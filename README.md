@@ -102,4 +102,5 @@ the file. A holder that cannot write its note shows as "another build".
 
 Run the checks with `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings` and `cargo test`. The tests use a private lock file and never touch
-the real one.
+the real one. [AGENTS.md](AGENTS.md) is the contributor guide, written for
+coding agents and people alike.
