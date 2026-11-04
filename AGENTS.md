@@ -52,6 +52,8 @@ examples, and update README with them.
 - Before a commit, run `cargo fmt --check`, `cargo queue test`, and
   `cargo queue clippy --all-targets -- -D warnings` for the host and for
   `--target x86_64-pc-windows-msvc` and `--target x86_64-unknown-linux-musl`.
+  `.github/workflows/ci.yml` runs the same checks natively on Linux, macOS
+  and Windows; change both together.
 - Integration tests in `tests/queue/` must run on Windows as well as Unix.
   The commands cargo-queue runs there are the test executable itself in a
   role from `child.rs`, which is why the target uses a `libtest-mimic`
