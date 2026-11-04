@@ -105,3 +105,7 @@ warnings` and `cargo test`; CI runs them on Linux, macOS and Windows. The
 tests use a private lock file and never touch the real one.
 [AGENTS.md](AGENTS.md) is the contributor guide, written for coding agents and
 people alike.
+
+## License
+
+MIT; see [LICENSE](LICENSE).

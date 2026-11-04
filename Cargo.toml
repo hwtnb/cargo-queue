@@ -3,6 +3,7 @@ name = "cargo-queue"
 version = "0.1.0"
 edition = "2024"
 description = "Runs one heavy build at a time across projects on one machine"
+license = "MIT"
 publish = false
 
 [dependencies]
