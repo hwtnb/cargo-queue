@@ -1,0 +1,27 @@
+[package]
+name = "cargo-queue"
+version = "0.1.0"
+edition = "2024"
+description = "Runs one heavy build at a time across projects on one machine"
+publish = false
+
+[dependencies]
+tokio = { version = "1.54", default-features = false, features = ["rt", "process", "signal", "macros"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+libtest-mimic = "0.8"
+tempfile = "3.27"
+
+[[test]]
+name = "queue"
+path = "tests/queue/main.rs"
+harness = false
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
