@@ -32,7 +32,7 @@ exits. A command stopped with Ctrl-Z keeps the lock until it is resumed or ends.
 The lock file is only read, so a sandbox that denies writes to it (such as
 Codex's workspace-write mode) still queues, but the file must exist already.
 Waiters print the holder recorded in <lock file>.holder, or \"another build\"
-when the holder could not record itself.
+when the holder could not record itself, and print it again every minute.
 
 Exit status: the command's own; 128+N if signal N ended it; 127 if it was not
 found; 126 if it could not be started; 2 for usage errors; 1 for other errors.

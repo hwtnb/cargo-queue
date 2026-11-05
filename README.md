@@ -38,11 +38,14 @@ that calls Cargo itself. cargo-queue reads its own options only before the
 command; everything from the first other argument on is passed through
 unchanged, so `cargo queue test --help` shows Cargo's help.
 
-A command that has to wait says for whom, and when it starts:
+A command that has to wait says for whom, says so again every minute with
+whoever holds the lock by then, and says when it starts:
 
 ```text
 cargo-queue: waiting for pid 4242 in /home/me/other-project: cargo clippy
-cargo-queue: started after 37s
+cargo-queue: still waiting after 60s for pid 4242 in /home/me/other-project: cargo clippy
+cargo-queue: still waiting after 120s for pid 5150 in /home/me/third-project: cargo test
+cargo-queue: started after 137s
 ```
 
 Only commands started through cargo-queue take turns. To make coding agents use
