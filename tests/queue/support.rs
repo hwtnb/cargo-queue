@@ -23,7 +23,7 @@ pub fn child_exe() -> String {
     exe.to_str().expect("a UTF-8 path").to_owned()
 }
 
-/// A private directory with its own lock file under `queue/`.
+/// A private directory with its own queue under `queue/`.
 pub struct Fixture {
     dir: TempDir,
 }
@@ -39,12 +39,17 @@ impl Fixture {
         self.dir.path().join(name)
     }
 
+    pub fn queue(&self) -> PathBuf {
+        self.path("queue")
+    }
+
+    /// The lock of the first slot, which a lone run takes.
     pub fn lock(&self) -> PathBuf {
-        self.path("queue/cargo-queue.lock")
+        self.path("queue/1.lock")
     }
 
     pub fn holder(&self) -> PathBuf {
-        self.path("queue/cargo-queue.lock.holder")
+        self.path("queue/1.holder")
     }
 
     pub fn read(&self, name: &str) -> String {
@@ -57,9 +62,11 @@ impl Fixture {
         command
             .args(args)
             .current_dir(self.dir.path())
-            .env("CARGO_QUEUE_LOCK", self.lock())
-            // Set when the tests themselves run under `cargo queue test`.
-            .env_remove("CARGO_QUEUE_HELD");
+            .env("CARGO_QUEUE_DIR", self.queue())
+            // Set when the tests themselves run under `cargo queue test`, or
+            // in the environment of whoever runs them.
+            .env_remove("CARGO_QUEUE_HELD")
+            .env_remove("CARGO_QUEUE_MAX_RUNS");
         command
     }
 

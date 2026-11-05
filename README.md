@@ -48,6 +48,18 @@ cargo-queue: still waiting after 120s for pid 5150 in /home/me/third-project: ca
 cargo-queue: started after 137s
 ```
 
+When `CARGO_QUEUE_MAX_RUNS` allows several runs at once, a waiting run lists
+every run it waits for, and says why when a slot is free but it still may not
+start:
+
+```text
+cargo-queue: waiting for 2 runs: pid 4242 in /home/me/a: cargo clippy; pid 5150 in /home/me/b: cargo test
+cargo-queue: waiting for pid 4242 in /home/me/a: cargo clippy (memory is under pressure)
+cargo-queue: waiting for pid 4242 in /home/me/a: cargo clippy (memory information is unavailable)
+cargo-queue: waiting for another build (another run did not record when it started)
+cargo-queue: waiting for pid 4242 in /home/me/a: cargo clippy (another run is still starting)
+```
+
 Only commands started through cargo-queue take turns. To make coding agents use
 it, say so in their instructions, for example: "Run Cargo build, check, clippy,
 test and run commands through `cargo queue`, and scripts that call Cargo
@@ -58,7 +70,8 @@ through `cargo-queue -- <command>`."
 | Name | Effect |
 |---|---|
 | `--background` | Lowers the command's priority. On macOS it runs under `taskpolicy -b`, on efficiency cores with low I/O priority, which can make builds much slower. On Windows it uses the below-normal priority class. Other systems reject it. |
-| `CARGO_QUEUE_LOCK` | The lock file. Defaults to `~/.cache/cargo-queue.lock`. |
+| `CARGO_QUEUE_DIR` | The directory that holds the queue's files. Defaults to `~/.cache/cargo-queue`. |
+| `CARGO_QUEUE_MAX_RUNS` | How many runs may go at once while memory allows, from 1 (the default) up. Set the same value for every run. |
 | `CARGO_QUEUE_HELD` | Set to `1` for the command. A cargo-queue started inside it runs at once instead of waiting for its own ancestor. |
 
 ### Exit status
@@ -69,27 +82,48 @@ through `cargo-queue -- <command>`."
 | 128 + N | Signal N ended the command (Unix). |
 | 127 | The command was not found. |
 | 126 | The command could not be started. |
-| 2 | The arguments name no command, or ask for something this system does not support. |
+| 2 | The arguments name no command, ask for something this system does not support, or `CARGO_QUEUE_MAX_RUNS` is not a positive whole number. |
 | 1 | Another error, such as a lock file that cannot be created. |
 
 ## How it works
 
-cargo-queue takes an exclusive lock on the lock file (`flock` on Unix,
-`LockFileEx` on Windows) and keeps it until the command exits. The run that
-holds the lock writes `pid <PID> in <directory>: <command>` to
-`<lock file>.holder`, which is what waiting runs print. The note lives in its
-own file because a Windows lock keeps other processes from reading the locked
-file.
+Each run that goes holds an exclusive lock on one of the numbered files
+`1.lock`, `2.lock` and so on in the queue directory (`flock` on Unix,
+`LockFileEx` on Windows), and keeps it until its command exits. It writes
+`pid <PID> in <directory>: <command>` to the matching `1.holder`, `2.holder`
+and so on, which is what waiting runs print. A note counts only while the
+process it names is running; any other note was left by a run that ended
+without clearing it. The note lives in its own file because a Windows lock
+keeps other processes from reading the locked file.
+
+A run starts at once when no other run is running. Beside other runs, it
+starts only when all of the following hold:
+
+- one of the first `CARGO_QUEUE_MAX_RUNS` slots is free;
+- every running run recorded a start at least 30 seconds ago, since a
+  build's memory use grows after it starts. A run's start is when it wrote
+  its note. A run that could not write its note, as in a sandbox, records
+  no start, so no run starts beside it;
+- memory is to spare. On macOS, the memory pressure level is normal and at
+  least 25% of memory is free. On Linux, at least 25% of memory is available
+  and, where the kernel reports memory pressure, tasks waited for memory less
+  than 10% of the last ten seconds. On Windows, at least 25% of physical
+  memory is available. When the system does not tell, as macOS does not
+  inside Codex's sandbox, the run does not start beside others.
+
+A waiting run checks again four times a second. `gate.lock` keeps two runs
+from deciding at once. Runs that are already going are never paused.
 
 On Unix, SIGINT, SIGTERM and SIGHUP are passed on to the command, and the lock
 is released only after the command has exited. On Windows, Ctrl-C and
 Ctrl-Break reach the command through the console, and a job object ends the
 command if cargo-queue is terminated.
 
-cargo-queue opens the lock file read-only, which is all locking needs. A
-sandbox that denies writes to it, such as Codex's `workspace-write` mode, can
-therefore still take part, as long as some run outside the sandbox has created
-the file. A holder that cannot write its note shows as "another build".
+cargo-queue opens the lock files read-only, which is all locking needs. A
+sandbox that denies writes to them, such as Codex's `workspace-write` mode,
+can therefore still take part, as long as some run outside the sandbox has
+created them. A holder that cannot write its note shows as "another build",
+and a slot whose lock file is missing is left unused.
 
 ## Limitations
 
@@ -97,6 +131,14 @@ the file. A holder that cannot write its note shows as "another build".
   neither wait nor make others wait.
 - Waiting runs start in no particular order; the operating system's lock
   does not promise first come, first served.
+- A run stopped with Ctrl-Z at the moment it holds `gate.lock` keeps every
+  other run from starting until it resumes. The others keep reporting that
+  they wait.
+- A note left by a run that was killed counts again if another process
+  later gets the same pid: waiting runs print it, and its old start counts
+  for the run now in the slot.
+- The memory check sees only the moment a run starts. Builds that grow
+  later can still crowd memory, and running ones are not paused when they do.
 - A command stopped with Ctrl-Z keeps the lock until it resumes or ends.
 - On Unix, if cargo-queue itself is killed with SIGKILL, the command keeps
   running without holding the lock.
@@ -105,7 +147,7 @@ the file. A holder that cannot write its note shows as "another build".
 
 Run the checks with `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings` and `cargo test`; CI runs them on Linux, macOS and Windows. The
-tests use a private lock file and never touch the real one.
+tests use a private queue directory and never touch the real one.
 [AGENTS.md](AGENTS.md) is the contributor guide, written for coding agents and
 people alike.
 

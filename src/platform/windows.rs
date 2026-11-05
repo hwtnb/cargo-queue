@@ -10,14 +10,20 @@ use std::ptr;
 
 use tokio::process::{Child, Command};
 use tokio::signal::windows::{CtrlBreak, CtrlC, ctrl_break, ctrl_c};
+use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
-use windows_sys::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess};
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::Threading::{
+    BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE,
+    WaitForSingleObject,
+};
 
 use crate::failure::Failure;
+use crate::platform::Memory;
 
 pub struct Supervision {
     ctrl_c: CtrlC,
@@ -96,4 +102,55 @@ pub fn background(program: OsString) -> Result<Command, Failure> {
     let mut command = Command::new(program);
     command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
     Ok(command)
+}
+
+/// Whether the process with this pid is known to be running: false once it
+/// has exited, even while handles keep it around, and when it cannot be
+/// opened.
+pub fn is_running(pid: u32) -> bool {
+    // SAFETY: OpenProcess takes plain values and returns null on failure.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    // SAFETY: `process` is a valid handle with synchronize access; a zero
+    // timeout only reads whether the process has exited.
+    let waited = unsafe { WaitForSingleObject(process, 0) };
+    // SAFETY: `process` is a valid handle that is not used again.
+    unsafe { CloseHandle(process) };
+    waited == WAIT_TIMEOUT
+}
+
+/// Spare when at least a quarter of physical memory is available.
+pub fn memory() -> Memory {
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(size_of::<MEMORYSTATUSEX>()).expect("a structure of 64 bytes"),
+        ..MEMORYSTATUSEX::default()
+    };
+    // SAFETY: `status` is a writable MEMORYSTATUSEX whose `dwLength` is set,
+    // as the function requires.
+    if unsafe { GlobalMemoryStatusEx(&raw mut status) } == 0 {
+        return Memory::Unknown;
+    }
+    Memory::judge(status.ullAvailPhys, status.ullTotalPhys)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    /// `Child` keeps its handle after `wait`, so the process object stays.
+    #[test]
+    fn an_exited_process_is_not_running_while_a_handle_keeps_it() {
+        let mut child = Command::new(env::current_exe().expect("this executable"))
+            .arg("--list")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start a process");
+        child.wait().expect("wait for it");
+        assert!(!is_running(child.id()));
+    }
 }

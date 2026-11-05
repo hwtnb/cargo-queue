@@ -1,4 +1,4 @@
-//! Runs the built cargo-queue against a private lock file per test.
+//! Runs the built cargo-queue against a private queue per test.
 //!
 //! The commands cargo-queue runs here are this test executable itself in a
 //! child role (see `child`), so the tests need no shell and run on Windows

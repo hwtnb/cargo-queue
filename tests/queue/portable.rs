@@ -20,6 +20,7 @@ pub fn trials() -> Vec<Trial> {
         the_cargo_form_runs_cargo_from_the_environment,
         the_command_form_skips_the_subcommand_name,
         help_version_and_usage_errors,
+        an_invalid_maximum_is_a_usage_error,
     ]
 }
 
@@ -129,13 +130,18 @@ fn processes_left_behind_by_the_command_do_not_hold_the_lock() {
     assert!(next.stderr.is_empty(), "{:?}", next.stderr);
 }
 
-/// A sandbox may deny writes to both files; the lock still works.
+/// A sandbox may deny writes to every file in the queue; the locks still
+/// work.
 fn read_only_lock_and_holder_files_still_queue() {
     let fixture = Fixture::new();
-    fs::write(fixture.lock(), "").expect("create the lock file");
-    fs::write(fixture.holder(), "").expect("create the holder file");
-    let _lock = ReadOnly::new(fixture.lock());
-    let _holder = ReadOnly::new(fixture.holder());
+    let _files: Vec<_> = ["gate.lock", "1.lock", "1.holder"]
+        .into_iter()
+        .map(|name| {
+            let path = fixture.queue().join(name);
+            fs::write(&path, "").expect("create the file");
+            ReadOnly::new(path)
+        })
+        .collect();
 
     let (holder, _) = fixture.hold(&[]);
     let mut waiter = fixture.start_child("exit", &["0"]);
@@ -186,4 +192,20 @@ fn help_version_and_usage_errors() {
         !fixture.lock().exists(),
         "no lock is taken without a command"
     );
+}
+
+fn an_invalid_maximum_is_a_usage_error() {
+    let fixture = Fixture::new();
+    for max in ["0", "two", "-1"] {
+        let mut command = fixture.child("exit", &["0"]);
+        command.env("CARGO_QUEUE_MAX_RUNS", max);
+        let run = Run::start(command).finish();
+        assert_eq!(run.status.code(), Some(2), "{max}");
+        assert_eq!(
+            run.stderr,
+            [format!(
+                "cargo-queue: CARGO_QUEUE_MAX_RUNS must be a positive whole number, not {max}"
+            )]
+        );
+    }
 }

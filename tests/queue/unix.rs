@@ -134,7 +134,7 @@ fn a_missing_lock_file_in_a_read_only_directory_is_explained() {
     let run = fixture.start(&["--", "true"]).finish();
     assert_eq!(run.status.code(), Some(1));
     let message = &run.stderr[0];
-    let expected = format!("cargo-queue: cannot create {}", fixture.lock().display());
+    let expected = format!("cargo-queue: cannot create {}", fixture.queue().display());
     assert!(message.starts_with(&expected), "{message}");
     assert!(
         message.ends_with("run cargo-queue once outside the sandbox to create it"),
