@@ -24,12 +24,23 @@ available as `cargo queue`. Cargo looks the subcommand up along `PATH`, so
 another `cargo-queue` earlier on `PATH` takes precedence; `which -a
 cargo-queue` shows the order.
 
+Then, outside any sandbox, create the queue's files:
+
+```bash
+cargo-queue --setup
+```
+
+Runs inside a sandbox that cannot write to `~/.cache`, such as Codex's
+`workspace-write` mode, need these files to exist already. Run it again after
+raising `CARGO_QUEUE_MAX_RUNS`, so that sandboxed runs can use the new slots
+too. It runs nothing, and running it again is harmless.
+
 ## Usage
 
 ```text
 cargo queue [--background] <cargo arguments...>
 cargo-queue [--background] -- <command...>
-cargo-queue --help | --version
+cargo-queue --setup | --help | --version
 ```
 
 The first form runs Cargo: `$CARGO`, which Cargo sets for its subcommands, or
@@ -121,9 +132,10 @@ command if cargo-queue is terminated.
 
 cargo-queue opens the lock files read-only, which is all locking needs. A
 sandbox that denies writes to them, such as Codex's `workspace-write` mode,
-can therefore still take part, as long as some run outside the sandbox has
-created them. A holder that cannot write its note shows as "another build",
-and a slot whose lock file is missing is left unused.
+can therefore still take part, as long as `cargo-queue --setup` or another
+run outside the sandbox has created them. A holder that cannot write its note
+shows as "another build", and a slot whose lock file is missing is left
+unused.
 
 ## Limitations
 

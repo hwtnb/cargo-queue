@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
@@ -92,6 +93,16 @@ impl Queue {
                 .get(),
         };
         Ok(Self { dir, max_runs })
+    }
+
+    /// Creates every file the queue needs up to this run's maximum, so runs
+    /// in a sandbox that cannot create them can still use every slot.
+    pub fn set_up(&self) -> io::Result<()> {
+        self.open_required("gate.lock")?;
+        for number in 1..=self.max_runs {
+            self.open_required(&format!("{number}.lock"))?;
+        }
+        Ok(())
     }
 
     /// Waits until this run may start, telling the user whom it waits for,
@@ -309,7 +320,7 @@ impl Queue {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 create_lock(&path).map_err(|error| {
                     let message = format!(
-                        "cannot create {} ({error}); run cargo-queue once outside the sandbox to create it",
+                        "cannot create {} ({error}); run `cargo-queue --setup` once outside the sandbox",
                         path.display()
                     );
                     io::Error::new(error.kind(), message)
@@ -321,6 +332,14 @@ impl Queue {
 
     fn holder_path(&self, number: u32) -> PathBuf {
         self.dir.join(format!("{number}.holder"))
+    }
+}
+
+/// The directory and how many slots it offers, as `--setup` reports them.
+impl fmt::Display for Queue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let slots = if self.max_runs == 1 { "slot" } else { "slots" };
+        write!(f, "{} with {} {slots}", self.dir.display(), self.max_runs)
     }
 }
 

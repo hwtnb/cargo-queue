@@ -12,7 +12,8 @@ are interfaces. Change them only with agreement on concrete before/after
 examples, and update README with them.
 
 - Invocation: `cargo queue [--background] <cargo arguments...>` and
-  `cargo-queue [--background] -- <command...>`. Only leading options belong
+  `cargo-queue [--background] -- <command...>`, and `cargo-queue --setup`
+  to create the queue's files. Only leading options belong
   to cargo-queue; everything from the first other argument on reaches Cargo
   unchanged.
 - Environment: `CARGO_QUEUE_DIR` names the queue directory,

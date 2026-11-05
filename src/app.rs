@@ -15,7 +15,7 @@ Run one heavy build at a time across projects on this machine.
 Usage:
   cargo queue [--background] <cargo arguments...>
   cargo-queue [--background] -- <command...>
-  cargo-queue --help | --version
+  cargo-queue --setup | --help | --version
 
 Waits for a lock in ~/.cache/cargo-queue (override with CARGO_QUEUE_DIR),
 then runs the command and releases the lock when it exits.
@@ -36,7 +36,9 @@ them recorded in its note a start at least 30 seconds ago and memory is to
 spare; no run starts beside one that could not write its note.
 
 The lock files are only read, so a sandbox that denies writes to them (such as
-Codex's workspace-write mode) still queues, but the files must exist already.
+Codex's workspace-write mode) still queues, but the files must exist already:
+run `cargo-queue --setup` outside the sandbox after installing and after
+raising CARGO_QUEUE_MAX_RUNS. It creates them and runs nothing.
 Waiters print the holders recorded in N.holder beside each N.lock, or \"another
 build\" when a holder could not record itself, and print them again every
 minute.
@@ -58,6 +60,10 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
             println!("cargo-queue {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        Ok(Invocation::Setup) => set_up().unwrap_or_else(|failure| {
+            eprintln!("cargo-queue: {failure}");
+            failure.code
+        }),
         Ok(Invocation::Run(request)) => queue_and_run(request).unwrap_or_else(|failure| {
             eprintln!("cargo-queue: {failure}");
             failure.code
@@ -67,6 +73,13 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
             Failure::USAGE
         }
     }
+}
+
+fn set_up() -> Result<i32, Failure> {
+    let queue = Queue::from_env()?;
+    queue.set_up()?;
+    println!("cargo-queue: created {queue}");
+    Ok(0)
 }
 
 fn queue_and_run(request: Request) -> Result<i32, Failure> {

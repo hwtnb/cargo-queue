@@ -1,4 +1,5 @@
-//! The command line: `[queue] [--background] (-- <command...> | <cargo arguments...>)`.
+//! The command line: `[queue] [--background] (-- <command...> | <cargo arguments...>)`,
+//! or one of `--setup`, `--help` and `--version`.
 //!
 //! Only the leading options belong to cargo-queue. Everything from the first
 //! other argument on goes to Cargo unchanged, so `cargo queue test --help`
@@ -12,6 +13,8 @@ use std::iter;
 pub enum Invocation {
     Help,
     Version,
+    /// Create the queue's files without running anything.
+    Setup,
     Run(Request),
 }
 
@@ -54,6 +57,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Usa
             }
             Some("-h" | "--help") => return Ok(Invocation::Help),
             Some("-V" | "--version") => return Ok(Invocation::Version),
+            Some("--setup") => return Ok(Invocation::Setup),
             Some("--") => (
                 Program::Named(args.next().ok_or(UsageError)?),
                 args.collect(),
@@ -105,7 +109,7 @@ mod tests {
 
     #[test]
     fn leading_options_belong_to_cargo_queue() {
-        use Invocation::{Help, Version};
+        use Invocation::{Help, Setup, Version};
         use Priority::{Background, Normal};
         let cases: &[(&[&str], Result<Invocation, UsageError>)] = &[
             (&["-h"], Ok(Help)),
@@ -113,6 +117,8 @@ mod tests {
             (&["-V"], Ok(Version)),
             (&["queue", "--version"], Ok(Version)),
             (&["--background", "--help"], Ok(Help)),
+            (&["--setup"], Ok(Setup)),
+            (&["queue", "--setup"], Ok(Setup)),
             (
                 &["--background", "test"],
                 run(Background, Program::Cargo, &["test"]),
@@ -157,6 +163,10 @@ mod tests {
                 run(Normal, named("sh"), &["-c", "exit 3"]),
             ),
             (&["--", "--help"], run(Normal, named("--help"), &[])),
+            (
+                &["test", "--setup"],
+                run(Normal, Program::Cargo, &["test", "--setup"]),
+            ),
         ];
         for (args, expected) in cases {
             assert_eq!(&parse_strs(args), expected, "{args:?}");

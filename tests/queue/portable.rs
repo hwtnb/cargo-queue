@@ -21,6 +21,7 @@ pub fn trials() -> Vec<Trial> {
         the_command_form_skips_the_subcommand_name,
         help_version_and_usage_errors,
         an_invalid_maximum_is_a_usage_error,
+        setup_creates_every_file_and_runs_nothing,
     ]
 }
 
@@ -208,4 +209,28 @@ fn an_invalid_maximum_is_a_usage_error() {
             )]
         );
     }
+}
+
+fn setup_creates_every_file_and_runs_nothing() {
+    let fixture = Fixture::new();
+    let queue = fixture.queue();
+    for _ in 0..2 {
+        let mut command = fixture.cargo_queue(&["queue", "--setup"]);
+        command.env("CARGO_QUEUE_MAX_RUNS", "3");
+        let run = Run::start(command).finish();
+        assert!(run.status.success(), "{:?}", run.stderr);
+        assert_eq!(
+            run.stdout,
+            [format!(
+                "cargo-queue: created {} with 3 slots",
+                queue.display()
+            )]
+        );
+    }
+    let mut files: Vec<_> = fs::read_dir(&queue)
+        .expect("list the queue")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["1.lock", "2.lock", "3.lock", "gate.lock"]);
 }
