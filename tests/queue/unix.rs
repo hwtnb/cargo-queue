@@ -86,10 +86,16 @@ fn sigterm_reaches_the_command_and_the_lock_outlasts_it() {
 /// signals, and one sent 10 ms later always reaches the command. The window
 /// between catching signals and starting the command lasts microseconds, so
 /// this test cannot single it out; `supervise` keeps that order by design.
+/// A loaded machine starts more slowly, so the delays keep growing until a
+/// signal has reached the command at least once.
 fn a_signal_during_startup_never_leaves_the_command_running() {
     let fixture = Fixture::new();
     let mut forwarded = 0;
-    for attempt in 0..20 {
+    for attempt in 0.. {
+        if attempt >= 20 && forwarded > 0 {
+            break;
+        }
+        assert!(attempt < 100, "no signal arrived after startup");
         let pidfile = format!("pid-{attempt}");
         let script = format!("echo $$ > {pidfile}; exec sleep 30");
         let run = fixture.start(&["--", "sh", "-c", &script]);
@@ -110,7 +116,6 @@ fn a_signal_during_startup_never_leaves_the_command_running() {
             "attempt {attempt}: command {pid} outlived cargo-queue"
         );
     }
-    assert!(forwarded > 0, "no signal arrived after startup");
 }
 
 fn a_stopped_command_keeps_the_lock() {
