@@ -963,6 +963,66 @@ mod tests {
         drop(first);
     }
 
+    /// Setup and a waiting run take the gate in turns; whichever comes
+    /// first, the run never takes a slot that setup has removed.
+    #[test]
+    fn a_waiting_run_uses_only_the_slots_setup_leaves() {
+        let dir = queue_dir();
+        let queue = queue(&dir, 2);
+        let first = start(&queue, "first");
+        let waiter = wait(&queue, "second", FOREVER, Memory::Spare);
+        waiter.until("(another run is still starting)");
+
+        // The waiting run keeps taking the gate, so setup may find it busy.
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match set_up(&queue, 1) {
+                Err(error)
+                    if error.to_string().ends_with("gate.lock; try again")
+                        && Instant::now() < deadline => {}
+                result => break result.expect("shrink the queue beside a waiting run"),
+            }
+        }
+        age(&queue, 1);
+        waiter.until(&format!("s for {}", name("first")));
+        assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
+        drop(first);
+        let _second = waiter.reported_turn();
+        assert_eq!(holder(&queue, 1), name("second"));
+        assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
+    }
+
+    /// The other order: the run takes the slot before setup looks.
+    #[test]
+    fn setup_finds_the_slot_a_waiting_run_took_meanwhile() {
+        let dir = queue_dir();
+        let queue = queue(&dir, 2);
+        let _first = start(&queue, "first");
+        let waiter = wait(&queue, "second", FOREVER, Memory::Spare);
+        waiter.until("(another run is still starting)");
+        age(&queue, 1);
+        let second = waiter.reported_turn();
+
+        let error = set_up(&queue, 1).expect_err("slot 2 is in use");
+        assert!(error.to_string().starts_with("slot 2 is in use"), "{error}");
+        assert_eq!(holder(&queue, 2), name("second"));
+        drop(second);
+    }
+
+    #[test]
+    fn setup_does_not_wait_for_a_busy_gate() {
+        let dir = queue_dir();
+        let queue = queue(&dir, 2);
+        let gate = open_or_create(&queue.dir.join("gate.lock")).expect("open the gate");
+        gate.lock().expect("hold the gate");
+        let error = set_up(&queue, 1).expect_err("the gate is busy");
+        assert!(
+            error.to_string().ends_with("gate.lock; try again"),
+            "{error}"
+        );
+        assert!(queue.lock_path(2).exists());
+    }
+
     /// A slot left behind would keep letting a second run go.
     #[test]
     fn setup_changes_nothing_while_a_slot_it_would_remove_is_in_use() {
