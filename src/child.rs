@@ -2,6 +2,7 @@
 //! ended.
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::iter;
 
@@ -27,12 +28,16 @@ pub fn command(request: Request) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// The command line as the holder note shows it.
-pub fn describe(command: &Command) -> String {
-    let command = command.as_std();
-    let words: Vec<_> = iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(|word| word.to_string_lossy())
+/// The command line as the holder note shows it: Cargo by its name, not by
+/// the toolchain path in `$CARGO`.
+pub fn describe(request: &Request) -> String {
+    let program = match &request.program {
+        Program::Cargo => OsStr::new("cargo"),
+        Program::Named(program) => program,
+    };
+    let words: Vec<_> = iter::once(program)
+        .chain(request.args.iter().map(OsString::as_os_str))
+        .map(OsStr::to_string_lossy)
         .collect();
     words.join(" ")
 }

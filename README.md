@@ -106,7 +106,8 @@ Each run that goes holds an exclusive lock on one of the numbered files
 `1.lock`, `2.lock` and so on in the queue directory (`flock` on Unix,
 `LockFileEx` on Windows), and keeps it until its command exits. It writes
 `pid <PID> in <directory>: <command>` to the matching `1.holder`, `2.holder`
-and so on, which is what waiting runs print. A note counts only while the
+and so on, which is what waiting runs print; Cargo appears there as `cargo`,
+whichever toolchain's binary runs. A note counts only while the
 process it names is running; any other note was left by a run that ended
 without clearing it. The note lives in its own file because a Windows lock
 keeps other processes from reading the locked file.

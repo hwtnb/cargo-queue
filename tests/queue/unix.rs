@@ -165,19 +165,20 @@ impl Drop for Sealed {
 
 #[cfg(target_os = "macos")]
 fn background() {
-    use crate::child::ROLE;
-    use crate::support::child_exe;
-
     let fixture = Fixture::new();
-    let exe = child_exe();
-    let holder = fixture.holder();
-    let holder = holder.to_str().expect("a UTF-8 path");
-    let mut command = fixture.cargo_queue(&["--background", "--", &exe, holder]);
-    command.env(ROLE, "print-file");
-    let run = Run::start(command).finish();
-    assert!(run.status.success(), "{:?}", run.stderr);
-    let suffix = format!(": taskpolicy -b {exe} {holder}");
-    assert!(run.stdout[0].ends_with(&suffix), "{:?}", run.stdout);
+    // The scheduling priority `ps` shows drops under `taskpolicy -b`.
+    let priority = |options: &[&str]| {
+        let script = ["--", "sh", "-c", "ps -o pri= -p $$"];
+        let run = fixture.start(&[options, &script].concat()).finish();
+        assert!(run.status.success(), "{:?}", run.stderr);
+        run.stdout[0]
+            .trim()
+            .parse::<u32>()
+            .expect("a scheduling priority")
+    };
+    let normal = priority(&[]);
+    let background = priority(&["--background"]);
+    assert!(background < normal, "{background} is not below {normal}");
 }
 
 #[cfg(not(target_os = "macos"))]

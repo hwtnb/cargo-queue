@@ -18,6 +18,7 @@ pub fn trials() -> Vec<Trial> {
         processes_left_behind_by_the_command_do_not_hold_the_lock,
         read_only_lock_and_holder_files_still_queue,
         the_cargo_form_runs_cargo_from_the_environment,
+        the_note_names_cargo_without_its_path,
         the_command_form_skips_the_subcommand_name,
         help_version_and_usage_errors,
         an_invalid_maximum_is_a_usage_error,
@@ -161,6 +162,18 @@ fn the_cargo_form_runs_cargo_from_the_environment() {
     let run = Run::start(command).finish();
     assert!(run.status.success(), "{:?}", run.stderr);
     assert_eq!(run.stdout, ["test --release -- --nocapture"]);
+}
+
+fn the_note_names_cargo_without_its_path() {
+    let fixture = Fixture::new();
+    let holder = fixture.holder();
+    let holder = holder.to_str().expect("a UTF-8 path");
+    let mut command = fixture.cargo_queue(&["queue", holder]);
+    command.env("CARGO", child_exe()).env(ROLE, "print-file");
+    let run = Run::start(command).finish();
+    assert!(run.status.success(), "{:?}", run.stderr);
+    let suffix = format!(": cargo {holder}");
+    assert!(run.stdout[0].ends_with(&suffix), "{:?}", run.stdout);
 }
 
 fn the_command_form_skips_the_subcommand_name() {

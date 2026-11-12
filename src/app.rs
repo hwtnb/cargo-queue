@@ -90,17 +90,18 @@ fn set_up() -> Result<i32, Failure> {
 }
 
 fn queue_and_run(request: Request) -> Result<i32, Failure> {
+    let note = holder_note(&request);
     let command = child::command(request)?;
     // A nested call already holds the lock through its ancestor; waiting for
     // it would wait forever.
     let _turn = match env::var_os(child::HELD) {
         Some(held) if held == "1" => None,
-        _ => Some(Queue::from_env()?.wait_for_turn(&holder_note(&command))?),
+        _ => Some(Queue::from_env()?.wait_for_turn(&note)?),
     };
     child::run(command)
 }
 
-fn holder_note(command: &tokio::process::Command) -> String {
+fn holder_note(request: &Request) -> String {
     let directory = env::current_dir().map_or_else(
         |_| "an unknown directory".to_owned(),
         |directory| directory.display().to_string(),
@@ -108,6 +109,6 @@ fn holder_note(command: &tokio::process::Command) -> String {
     format!(
         "pid {} in {directory}: {}\n",
         process::id(),
-        child::describe(command)
+        child::describe(request)
     )
 }
