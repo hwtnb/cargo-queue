@@ -49,6 +49,10 @@ that calls Cargo itself. cargo-queue reads its own options only before the
 command; everything from the first other argument on is passed through
 unchanged, so `cargo queue test --help` shows Cargo's help.
 
+To use another toolchain, name it before `queue`, as in
+`cargo +nightly queue build`. rustup reads `+toolchain` only as Cargo's first
+argument, so cargo-queue rejects `cargo queue +nightly build` without waiting.
+
 A command that has to wait says for whom, says so again every minute with
 whoever holds the lock by then, and says when it starts:
 
@@ -93,7 +97,7 @@ through `cargo-queue -- <command>`."
 | 128 + N | Signal N ended the command (Unix). |
 | 127 | The command was not found. |
 | 126 | The command could not be started. |
-| 2 | The arguments name no command, ask for something this system does not support, or `CARGO_QUEUE_MAX_RUNS` is not a positive whole number. |
+| 2 | The arguments name no command, put a `+toolchain` after `queue`, ask for something this system does not support, or `CARGO_QUEUE_MAX_RUNS` is not a positive whole number. |
 | 1 | Another error, such as a lock file that cannot be created. |
 
 ## How it works

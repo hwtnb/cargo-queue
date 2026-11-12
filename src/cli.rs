@@ -40,9 +40,14 @@ pub enum Program {
     Named(OsString),
 }
 
-/// The arguments name no command to run.
 #[derive(Debug, PartialEq, Eq)]
-pub struct UsageError;
+pub enum UsageError {
+    /// The arguments name no command to run.
+    NoCommand,
+    /// A `+toolchain` after `queue`. Only rustup's `cargo` understands it,
+    /// and only as its own first argument.
+    Toolchain(OsString),
+}
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, UsageError> {
     let mut args = args.into_iter().peekable();
@@ -59,9 +64,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Usa
             Some("-V" | "--version") => return Ok(Invocation::Version),
             Some("--setup") => return Ok(Invocation::Setup),
             Some("--") => (
-                Program::Named(args.next().ok_or(UsageError)?),
+                Program::Named(args.next().ok_or(UsageError::NoCommand)?),
                 args.collect(),
             ),
+            Some(toolchain) if toolchain.starts_with('+') => {
+                return Err(UsageError::Toolchain(arg));
+            }
             _ => (Program::Cargo, iter::once(arg).chain(args).collect()),
         };
         return Ok(Invocation::Run(Request {
@@ -70,7 +78,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Usa
             args,
         }));
     }
-    Err(UsageError)
+    Err(UsageError::NoCommand)
 }
 
 #[cfg(test)]
@@ -103,8 +111,31 @@ mod tests {
             &["queue", "--background"],
             &["--"],
         ] {
-            assert_eq!(parse_strs(args), Err(UsageError), "{args:?}");
+            assert_eq!(parse_strs(args), Err(UsageError::NoCommand), "{args:?}");
         }
+    }
+
+    #[test]
+    fn a_toolchain_belongs_before_queue() {
+        for args in [
+            &["queue", "+nightly", "build"][..],
+            &["--background", "+1.90.0", "test"],
+        ] {
+            let toolchain = OsString::from(args[1]);
+            assert_eq!(
+                parse_strs(args),
+                Err(UsageError::Toolchain(toolchain)),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse_strs(&["--", "+x"]),
+            run(Priority::Normal, named("+x"), &[])
+        );
+        assert_eq!(
+            parse_strs(&["test", "+nightly"]),
+            run(Priority::Normal, Program::Cargo, &["test", "+nightly"])
+        );
     }
 
     #[test]

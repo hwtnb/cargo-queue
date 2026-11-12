@@ -189,6 +189,12 @@ fn help_version_and_usage_errors() {
         assert_eq!(usage.status.code(), Some(2), "{args:?}");
         assert!(usage.stderr.iter().any(|line| line == "Usage:"), "{args:?}");
     }
+    let toolchain = fixture.start(&["queue", "+nightly", "build"]).finish();
+    assert_eq!(toolchain.status.code(), Some(2));
+    assert_eq!(
+        toolchain.stderr,
+        ["cargo-queue: write `cargo +nightly queue ...`, not `cargo queue +nightly ...`"]
+    );
     assert!(
         !fixture.lock().exists(),
         "no lock is taken without a command"

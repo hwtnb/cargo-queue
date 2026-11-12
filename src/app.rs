@@ -20,7 +20,7 @@ Usage:
 Waits for a lock in ~/.cache/cargo-queue (override with CARGO_QUEUE_DIR),
 then runs the command and releases the lock when it exits.
 The first form runs Cargo; the second runs any command, such as a script that
-calls Cargo itself. --background lowers the command's priority: on macOS it
+calls Cargo itself. For another toolchain, write `cargo +nightly queue build`. --background lowers the command's priority: on macOS it
 runs under `taskpolicy -b` (efficiency cores and low I/O priority), which can
 make builds much slower; on Windows it uses the below-normal priority class.
 
@@ -45,7 +45,7 @@ minute.
 
 Exit status: the command's own; 128+N if signal N ended it; 127 if it was not
 found; 126 if it could not be started; 2 for usage errors, including an
-invalid CARGO_QUEUE_MAX_RUNS; 1 for other errors.
+invalid CARGO_QUEUE_MAX_RUNS and a +toolchain after `queue`; 1 for other errors.
 ";
 
 /// Carries out the arguments after the program name and returns the exit
@@ -68,8 +68,15 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
             eprintln!("cargo-queue: {failure}");
             failure.code
         }),
-        Err(UsageError) => {
+        Err(UsageError::NoCommand) => {
             eprint!("{HELP}");
+            Failure::USAGE
+        }
+        Err(UsageError::Toolchain(toolchain)) => {
+            let toolchain = toolchain.display();
+            eprintln!(
+                "cargo-queue: write `cargo {toolchain} queue ...`, not `cargo queue {toolchain} ...`"
+            );
             Failure::USAGE
         }
     }
