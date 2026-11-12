@@ -78,14 +78,10 @@ pub fn background(_program: OsString) -> Result<Command, Failure> {
     ))
 }
 
-/// Whether the process with this pid is known to be running: false once it
-/// has exited, even before its parent reaps it, and when the system will
-/// not say.
+/// When the process started, to the microsecond.
 #[cfg(target_os = "macos")]
-pub fn is_running(pid: u32) -> bool {
-    let Ok(pid) = libc::c_int::try_from(pid) else {
-        return false;
-    };
+pub fn incarnation(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("a small structure");
     // SAFETY: `info` is a writable buffer of `size` bytes. With argument 0,
@@ -99,32 +95,41 @@ pub fn is_running(pid: u32) -> bool {
             size,
         )
     };
-    written == size
+    if written != size {
+        return None;
+    }
+    // SAFETY: the call filled the whole structure.
+    let info = unsafe { info.assume_init() };
+    Some(format!(
+        "{}.{:06}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
 }
 
-/// Whether the process with this pid is known to be running: false once it
-/// has exited, even before its parent reaps it, and when the system will
-/// not say.
+/// The boot and the clock tick in which the process started.
 #[cfg(target_os = "linux")]
-pub fn is_running(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|stat| linux::is_running_state(&stat))
+pub fn incarnation(pid: u32) -> Option<String> {
+    use std::fs;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let started = linux::start_tick(&stat)?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(format!("{}:{started}", boot.trim()))
 }
 
-/// Whether a process with this pid exists. Other systems keep a process
-/// that has exited until its parent reaps it, and this cannot tell; it
-/// decides only what waiting runs print, as memory is never spare here.
+/// Other systems are only asked whether the pid exists, so every process
+/// with it counts as the same one, even one that has exited and is not yet
+/// reaped. That decides only what waiting runs print, as memory is never
+/// spare here.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn is_running(pid: u32) -> bool {
+pub fn incarnation(pid: u32) -> Option<String> {
     // Zero would address this process group, not a process.
-    let Some(pid) = libc::pid_t::try_from(pid).ok().filter(|&pid| pid > 0) else {
-        return false;
-    };
+    let pid = libc::pid_t::try_from(pid).ok().filter(|&pid| pid > 0)?;
     // SAFETY: kill takes plain integers, and signal 0 only checks that the
     // process exists.
     let found = unsafe { libc::kill(pid, 0) } == 0;
     // EPERM: the process exists but belongs to someone else.
-    found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    (found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+        .then(|| "exists".to_owned())
 }
 
 /// Spare when memory pressure is normal and at least a quarter of memory is
@@ -206,13 +211,17 @@ mod linux {
         Some((field("MemAvailable")?, field("MemTotal")?))
     }
 
-    /// Whether `/proc/<pid>/stat` shows a process that has not exited. The
-    /// state follows the command name, which may itself hold parentheses.
-    pub fn is_running_state(stat: &str) -> bool {
-        let state = stat
-            .rsplit_once(") ")
-            .and_then(|(_, rest)| rest.chars().next());
-        state.is_some_and(|state| !matches!(state, 'Z' | 'X' | 'x'))
+    /// The start time in `/proc/<pid>/stat`, in clock ticks since boot,
+    /// unless the process has exited. The fields follow the command name,
+    /// which may itself hold spaces and parentheses.
+    pub fn start_tick(stat: &str) -> Option<&str> {
+        /// Where the state and the start time are among those fields.
+        const STATE: usize = 0;
+        const START_TIME: usize = 19;
+        let (_, rest) = stat.rsplit_once(") ")?;
+        let fields: Vec<_> = rest.split(' ').collect();
+        let exited = matches!(*fields.get(STATE)?, "Z" | "X" | "x");
+        fields.get(START_TIME).copied().filter(|_| !exited)
     }
 
     /// `avg10` of the `some` line in `/proc/pressure/memory`.
@@ -247,12 +256,17 @@ mod linux {
         }
 
         #[test]
-        fn reads_whether_a_process_has_exited() {
-            assert!(is_running_state("42 (cargo) S 1 42 42 0 -1"));
-            assert!(is_running_state("42 (a) (b) R 1 42 42 0 -1"));
-            assert!(!is_running_state("42 (cargo) Z 1 42 42 0 -1"));
-            assert!(!is_running_state("42 (cargo) X 1 42 42 0 -1"));
-            assert!(!is_running_state(""));
+        fn reads_when_a_running_process_started() {
+            let rest = "1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 8675309 1000 200";
+            assert_eq!(start_tick(&format!("42 (cargo) S {rest}")), Some("8675309"));
+            assert_eq!(
+                start_tick(&format!("42 (a) (b c) R {rest}")),
+                Some("8675309")
+            );
+            assert_eq!(start_tick(&format!("42 (cargo) Z {rest}")), None);
+            assert_eq!(start_tick(&format!("42 (cargo) X {rest}")), None);
+            assert_eq!(start_tick("42 (cargo) S 1 42"), None);
+            assert_eq!(start_tick(""), None);
         }
     }
 }
@@ -272,7 +286,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_exited_process_is_not_running_before_it_is_reaped() {
+    fn a_process_that_exited_has_no_incarnation_before_it_is_reaped() {
         let mut child = Command::new(env::current_exe().expect("this executable"))
             .arg("--list")
             .stdout(Stdio::null())
@@ -291,7 +305,7 @@ mod tests {
             )
         };
         assert_eq!(waited, 0, "{}", io::Error::last_os_error());
-        assert!(!is_running(child.id()));
+        assert_eq!(incarnation(child.id()), None);
         child.wait().expect("reap it");
     }
 }

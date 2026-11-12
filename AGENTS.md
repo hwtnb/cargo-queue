@@ -27,10 +27,10 @@ examples, and update README with them.
 - Files: the queue directory holds `N.lock` per slot and `gate.lock`. The
   slots that exist are the runs that may go at once; only `--setup` removes
   them, and a run creates slot 1 when there is none. Lock files are only
-  opened and locked, never written. The holder note
-  `pid <PID> in <cwd>: <command>` lives in `N.holder`. It counts only while
-  that pid runs: then it names the run, and its modification time is when
-  the run started.
+  opened and locked, never written. The holder note lives in `N.holder` and
+  has two lines: `<PID> <incarnation> <start in Unix seconds>`, then
+  `pid <PID> in <cwd>: <command>`, which waiting runs print. It counts only
+  while the process with that pid and incarnation runs.
 - Messages: the "waiting for", "still waiting after" and "started after"
   lines on stderr, as README shows them.
 - Exit codes: the command's own; 128+N for signal N; 127 when the command is
@@ -49,8 +49,8 @@ examples, and update README with them.
   memory, since real memory is not under a test's control.
 - `src/platform.rs` re-exports the names that `src/platform/unix.rs` and
   `src/platform/windows.rs` both define: signal or console handling,
-  forwarding, the Windows job object, `--background`, exit status and
-  whether memory is to spare. Keep
+  forwarding, the Windows job object, `--background`, exit status, which
+  process has a pid and whether memory is to spare. Keep
   `cfg` out of the shared modules; extend that common surface instead.
 - Every new crate needs a stated reason. Write dependency versions as
   `major.minor` (for example `"1.54"`); `Cargo.lock` is tracked. The package

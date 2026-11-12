@@ -1,4 +1,11 @@
 //! The OS-specific parts of running the command, under one set of names.
+//!
+//! `incarnation(pid)` gives a word that tells the running process with this
+//! pid from any other that has had the pid or will have it. It gives `None`
+//! once the process has exited, even before it is reaped, and when the
+//! system will not say. Linux, macOS and Windows keep that promise; on
+//! other Unix systems every process with the pid looks the same, exited or
+//! not.
 
 #[cfg(unix)]
 mod unix;
@@ -6,9 +13,9 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
-pub use unix::{Supervision, background, exit_code, is_running, memory};
+pub use unix::{Supervision, background, exit_code, incarnation, memory};
 #[cfg(windows)]
-pub use windows::{Supervision, background, exit_code, is_running, memory};
+pub use windows::{Supervision, background, exit_code, incarnation, memory};
 
 /// Whether the system has memory for another build beside running ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,8 +55,10 @@ mod tests {
     }
 
     #[test]
-    fn this_process_is_running() {
-        assert!(is_running(std::process::id()));
+    fn a_running_process_keeps_its_incarnation() {
+        let first = incarnation(std::process::id());
+        assert!(first.is_some());
+        assert_eq!(incarnation(std::process::id()), first);
     }
 
     /// The real reading. A sandbox may hide it on macOS; the systems in CI

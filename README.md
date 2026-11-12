@@ -124,13 +124,23 @@ through `cargo-queue -- <command>`."
 
 Each run that goes holds an exclusive lock on one of the numbered files
 `1.lock`, `2.lock` and so on in the queue directory (`flock` on Unix,
-`LockFileEx` on Windows), and keeps it until its command exits. It writes
-`pid <PID> in <directory>: <command>` to the matching `1.holder`, `2.holder`
-and so on, which is what waiting runs print; Cargo appears there as `cargo`,
-whichever toolchain's binary runs. A note counts only while the
-process it names is running; any other note was left by a run that ended
-without clearing it. The note lives in its own file because a Windows lock
-keeps other processes from reading the locked file.
+`LockFileEx` on Windows), and keeps it until its command exits. It writes a
+note of two lines to the matching `1.holder`, `2.holder` and so on:
+
+```text
+4242 1794476288.487855 1794476289
+pid 4242 in /home/me/a: cargo test
+```
+
+The first line is for other runs: the pid, a word that tells that process
+from any other with the same pid (when it started, as the system records it),
+and the start of the run in seconds since the Unix epoch. The second line is
+what waiting runs print: the command as it was given, so Cargo appears as
+`cargo`, whichever toolchain's binary runs, and a `--background` run appears
+without the `taskpolicy` it runs under. A note counts only while the very process that wrote
+it is running; any other note was left by a run that ended without clearing
+it. The note lives in its own file because a Windows lock keeps other
+processes from reading the locked file.
 
 A run starts at once when no other run is running. Beside other runs, it
 starts only when all of the following hold:
@@ -171,9 +181,10 @@ shows as "another build".
 - A run stopped with Ctrl-Z at the moment it holds `gate.lock` keeps every
   other run from starting until it resumes. The others keep reporting that
   they wait.
-- A note left by a run that was killed counts again if another process
-  later gets the same pid: waiting runs print it, and its old start counts
-  for the run now in the slot.
+- On systems other than Linux, macOS and Windows, a note left by a run that
+  was killed counts for as long as any process has its pid, so waiting runs
+  may print it for a later run. Memory is never read there, so no run starts
+  beside another because of it.
 - The memory check sees only the moment a run starts. Builds that grow
   later can still crowd memory, and running ones are not paused when they do.
 - A command stopped with Ctrl-Z keeps the lock until it resumes or ends.

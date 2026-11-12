@@ -58,9 +58,11 @@ fn the_holder_note_is_cleared_afterwards() {
     let holder = fixture.holder();
     let holder = holder.to_str().expect("a UTF-8 path");
     let mut run = fixture.start_child("print-file", &[holder]);
+    let writer = run.stdout_line();
     let note = run.stdout_line();
     let pid = run.pid();
     assert!(run.finish().status.success());
+    assert!(writer.starts_with(&format!("{pid} ")), "{writer}");
     assert!(note.starts_with(&format!("pid {pid} in ")), "{note}");
     assert!(
         note.ends_with(&format!(": {} {holder}", child_exe())),
@@ -173,7 +175,7 @@ fn the_note_names_cargo_without_its_path() {
     let run = Run::start(command).finish();
     assert!(run.status.success(), "{:?}", run.stderr);
     let suffix = format!(": cargo {holder}");
-    assert!(run.stdout[0].ends_with(&suffix), "{:?}", run.stdout);
+    assert!(run.stdout[1].ends_with(&suffix), "{:?}", run.stdout);
 }
 
 fn the_command_form_skips_the_subcommand_name() {

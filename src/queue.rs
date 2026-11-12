@@ -5,12 +5,13 @@
 //! - `N.lock`, held by the run in slot N for as long as its command runs.
 //!   The slots that exist are the runs that may go at once, for every run
 //!   alike; `--setup` creates and removes them;
-//! - `N.holder`, the note naming that run for the runs that wait, written
-//!   when the run starts. A note counts only while the pid it names runs:
-//!   then it names the run in the slot, and its modification time is when
-//!   that run started. It is a separate file because Windows locks are
-//!   mandatory: while one process holds a lock, no other process can read
-//!   the locked file;
+//! - `N.holder`, the note that run writes when it starts. Its first line is
+//!   for other runs to check: the pid, the word that tells that process
+//!   from any other with the same pid, and the start in seconds since the
+//!   Unix epoch. Its second line names the run for the runs that wait. A
+//!   note counts only while that very process runs. It is a separate file
+//!   because Windows locks are mandatory: while one process holds a lock,
+//!   no other process can read the locked file;
 //! - `gate.lock`, held while one run decides whether it may start or
 //!   `--setup` changes the slots, so no two of them act at once. A run lists
 //!   and opens the slots anew each time it holds the gate, so it never acts
@@ -25,11 +26,12 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::platform::{self, Memory};
 
@@ -146,9 +148,9 @@ impl Queue {
     }
 
     /// Waits until this run may start, telling the user whom it waits for,
-    /// then records `note` for the runs that queue behind this one.
-    pub fn wait_for_turn(&self, note: &str) -> io::Result<Turn> {
-        self.wait(note, &Timing::REAL, platform::memory, |message| {
+    /// then notes `name` for the runs that queue behind this one.
+    pub fn wait_for_turn(&self, name: &str) -> io::Result<Turn> {
+        self.wait(name, &Timing::REAL, platform::memory, |message| {
             eprintln!("cargo-queue: {message}");
         })
     }
@@ -158,7 +160,7 @@ impl Queue {
     /// how long it took.
     fn wait(
         &self,
-        note: &str,
+        name: &str,
         timing: &Timing,
         mut memory: impl FnMut() -> Memory,
         mut report: impl FnMut(String),
@@ -168,7 +170,7 @@ impl Queue {
         let mut blocked = None;
         let mut next_report = None;
         let turn = loop {
-            match self.try_start(note, timing.ramp_up, &mut memory)? {
+            match self.try_start(name, timing.ramp_up, &mut memory)? {
                 Attempt::Started(turn) => break turn,
                 Attempt::Blocked(reason) => blocked = Some(reason),
                 Attempt::Busy => {}
@@ -197,10 +199,10 @@ impl Queue {
         Ok(turn)
     }
 
-    /// Takes a slot and records `note` in it if this run may start now.
+    /// Takes a slot and notes `name` in it if this run may start now.
     fn try_start(
         &self,
-        note: &str,
+        name: &str,
         ramp_up: Duration,
         memory: &mut impl FnMut() -> Memory,
     ) -> io::Result<Attempt> {
@@ -256,7 +258,7 @@ impl Queue {
         // Written before the gate opens, so the next run to decide sees
         // when this one started.
         Ok(Attempt::Started(Turn {
-            holder: write_holder(&self.holder_path(number), note),
+            holder: write_holder(&self.holder_path(number), name),
             _lock: lock,
         }))
     }
@@ -277,21 +279,9 @@ impl Queue {
         }
     }
 
-    /// The note of the run in slot `number`, if it wrote one. A note whose
-    /// pid does not run was left by a run that ended without clearing it,
-    /// and the run in the slot now could not write its own.
+    /// The note of the run in slot `number`, if it wrote one.
     fn note(&self, number: u32) -> Option<Note> {
-        let mut file = File::open(self.holder_path(number)).ok()?;
-        let mut text = String::new();
-        file.read_to_string(&mut text).ok()?;
-        let pid = text.strip_prefix("pid ")?.split(' ').next()?.parse().ok()?;
-        if !platform::is_running(pid) {
-            return None;
-        }
-        Some(Note {
-            started: file.metadata().ok()?.modified().ok()?,
-            text: text.trim().to_owned(),
-        })
+        Note::read(&fs::read_to_string(self.holder_path(number)).ok()?)
     }
 
     /// Whom a run waits for and why, for its messages. Without a decision
@@ -303,14 +293,14 @@ impl Queue {
                 .iter()
                 .map(|&number| {
                     self.note(number)
-                        .map_or_else(|| "another build".to_owned(), |note| note.text)
+                        .map_or_else(|| "another build".to_owned(), |note| note.name)
                 })
                 .collect(),
             None => self
                 .slot_numbers()?
                 .into_iter()
                 .filter_map(|number| self.note(number))
-                .map(|note| note.text)
+                .map(|note| note.name)
                 .collect(),
         };
         let holders = match holders.as_slice() {
@@ -374,12 +364,41 @@ impl Drop for Turn {
     }
 }
 
-/// A note that counts, as the pid it names runs.
+/// A note that counts, as the process that wrote it runs.
 struct Note {
-    /// The note without its line ending, as waiting runs print it.
-    text: String,
+    /// The run as waiting runs print it.
+    name: String,
     /// When the run wrote it.
     started: SystemTime,
+}
+
+impl Note {
+    /// The note this process leaves, unless the system will not say which
+    /// process it is.
+    fn write(name: &str) -> Option<String> {
+        let pid = process::id();
+        let incarnation = platform::incarnation(pid)?;
+        let started = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        Some(format!(
+            "{pid} {incarnation} {}\n{name}\n",
+            started.as_secs()
+        ))
+    }
+
+    /// The note in `contents` if its writer still runs. Any other note was
+    /// left by a run that ended without clearing it, and the run in the slot
+    /// now could not write its own.
+    fn read(contents: &str) -> Option<Self> {
+        let (writer, name) = contents.split_once('\n')?;
+        let mut writer = writer.split(' ');
+        let pid = writer.next()?.parse().ok()?;
+        let incarnation = writer.next()?;
+        let started = UNIX_EPOCH.checked_add(Duration::from_secs(writer.next()?.parse().ok()?))?;
+        (platform::incarnation(pid).as_deref() == Some(incarnation)).then(|| Self {
+            name: name.trim_end().to_owned(),
+            started,
+        })
+    }
 }
 
 enum Attempt {
@@ -457,9 +476,9 @@ fn cannot_open(path: &Path, error: io::Error) -> io::Error {
 
 /// Writes the note if this run may; a sandboxed run leaves waiters to print
 /// "another build" instead.
-fn write_holder(path: &Path, note: &str) -> Option<File> {
+fn write_holder(path: &Path, name: &str) -> Option<File> {
     let mut file = File::create(path).ok()?;
-    file.write_all(note.as_bytes()).ok()?;
+    file.write_all(Note::write(name)?.as_bytes()).ok()?;
     Some(file)
 }
 
@@ -521,14 +540,9 @@ mod tests {
         }
     }
 
-    /// A note as cargo-queue writes it, naming this running test process.
-    fn note(command: &str) -> String {
-        format!("pid {} in /work: {command}\n", process::id())
-    }
-
-    /// The note as waiting runs show it.
-    fn shown(command: &str) -> String {
-        note(command).trim().to_owned()
+    /// A run as cargo-queue names it in its note.
+    fn name(command: &str) -> String {
+        format!("pid {} in /work: {command}", process::id())
     }
 
     /// A run that has to start without waiting.
@@ -536,7 +550,7 @@ mod tests {
         let report = |message| panic!("{command} had to wait: {message}");
         queue
             .wait(
-                &note(command),
+                &name(command),
                 &timing(Duration::ZERO),
                 || Memory::Spare,
                 report,
@@ -548,10 +562,10 @@ mod tests {
     fn wait(queue: &Queue, command: &str, ramp_up: Duration, memory: Memory) -> Waiter {
         let (sender, messages) = mpsc::channel();
         let queue = queue.clone();
-        let note = note(command);
+        let name = name(command);
         let run = thread::spawn(move || {
             queue.wait(
-                &note,
+                &name,
                 &timing(ramp_up),
                 || memory,
                 |message| {
@@ -559,21 +573,26 @@ mod tests {
                 },
             )
         });
-        Waiter { run, messages }
+        Waiter {
+            run,
+            messages,
+            deadline: Instant::now() + TIMEOUT,
+        }
     }
 
+    /// The name in slot `number`'s note, whoever wrote it.
     fn holder(queue: &Queue, number: u32) -> String {
-        fs::read_to_string(queue.holder_path(number)).expect("read the note")
+        let note = fs::read_to_string(queue.holder_path(number)).expect("read the note");
+        note.lines().nth(1).unwrap_or_default().to_owned()
     }
 
     /// Makes the run in slot `number` look as if it started long ago.
     fn age(queue: &Queue, number: u32) {
-        let note = File::options()
-            .write(true)
-            .open(queue.holder_path(number))
-            .expect("open the note");
-        note.set_modified(SystemTime::now() - 2 * FOREVER)
-            .expect("backdate the note");
+        let path = queue.holder_path(number);
+        let note = fs::read_to_string(&path).expect("read the note");
+        let (writer, name) = note.split_once('\n').expect("a note of two lines");
+        let (process, _started) = writer.rsplit_once(' ').expect("a start");
+        fs::write(path, format!("{process} 0\n{name}")).expect("backdate the note");
     }
 
     /// The pid of a process that has exited.
@@ -590,11 +609,14 @@ mod tests {
     struct Waiter {
         run: JoinHandle<io::Result<Turn>>,
         messages: Receiver<String>,
+        /// When the test gives up, however many messages still arrive.
+        deadline: Instant,
     }
 
     impl Waiter {
         fn message(&self) -> String {
-            self.messages.recv_timeout(TIMEOUT).expect("a message")
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            self.messages.recv_timeout(left).expect("a message")
         }
 
         /// Skips messages until one ends with `suffix`.
@@ -604,6 +626,10 @@ mod tests {
 
         /// Waits for the turn, whatever the run printed.
         fn turn(self) -> Turn {
+            while !self.run.is_finished() {
+                assert!(Instant::now() < self.deadline, "the run did not start");
+                thread::sleep(Duration::from_millis(1));
+            }
             self.run.join().expect("the waiter").expect("a turn")
         }
 
@@ -625,19 +651,20 @@ mod tests {
         let queue = queue(&dir, 1);
         let first = start(&queue, "first");
         let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
-        assert_eq!(waiter.message(), format!("waiting for {}", shown("first")));
+        assert_eq!(waiter.message(), format!("waiting for {}", name("first")));
         let still = waiter.message();
         assert!(still.starts_with("still waiting after "), "{still}");
         assert!(
-            still.ends_with(&format!("s for {}", shown("first"))),
+            still.ends_with(&format!("s for {}", name("first"))),
             "{still}"
         );
 
-        fs::write(queue.holder_path(1), note("renamed")).expect("change the note");
-        waiter.until(&format!("s for {}", shown("renamed")));
+        let renamed = Note::write(&name("renamed")).expect("a note");
+        fs::write(queue.holder_path(1), renamed).expect("change the note");
+        waiter.until(&format!("s for {}", name("renamed")));
         drop(first);
         let _second = waiter.reported_turn();
-        assert_eq!(holder(&queue, 1), note("second"));
+        assert_eq!(holder(&queue, 1), name("second"));
     }
 
     #[test]
@@ -646,10 +673,10 @@ mod tests {
         let queue = queue(&dir, 2);
         let mut unknown = || Memory::Unknown;
         let attempt = queue
-            .try_start(&note("first"), FOREVER, &mut unknown)
+            .try_start(&name("first"), FOREVER, &mut unknown)
             .expect("an attempt");
         assert!(matches!(attempt, Attempt::Started(_)));
-        assert_eq!(holder(&queue, 1), note("first"));
+        assert_eq!(holder(&queue, 1), name("first"));
     }
 
     #[test]
@@ -660,14 +687,14 @@ mod tests {
         let tight = wait(&queue, "second", Duration::ZERO, Memory::Tight);
         assert_eq!(
             tight.message(),
-            format!("waiting for {} (memory is under pressure)", shown("first"))
+            format!("waiting for {} (memory is under pressure)", name("first"))
         );
         let unknown = wait(&queue, "third", Duration::ZERO, Memory::Unknown);
         assert_eq!(
             unknown.message(),
             format!(
                 "waiting for {} (memory information is unavailable)",
-                shown("first")
+                name("first")
             )
         );
         drop(first);
@@ -684,7 +711,7 @@ mod tests {
 
         let _fourth = start(&queue, "fourth");
         let _fifth = wait(&queue, "fifth", Duration::ZERO, Memory::Spare).turn();
-        assert_eq!(holder(&queue, 2), note("fifth"));
+        assert_eq!(holder(&queue, 2), name("fifth"));
     }
 
     #[test]
@@ -697,12 +724,12 @@ mod tests {
             waiter.message(),
             format!(
                 "waiting for {} (another run is still starting)",
-                shown("first")
+                name("first")
             )
         );
         age(&queue, 1);
         let _second = waiter.reported_turn();
-        assert_eq!(holder(&queue, 2), note("second"));
+        assert_eq!(holder(&queue, 2), name("second"));
     }
 
     /// A sandboxed run cannot write its note, so nothing tells when it
@@ -713,7 +740,6 @@ mod tests {
         let queue = queue(&dir, 2);
         let first = start(&queue, "first");
         fs::write(queue.holder_path(1), "").expect("clear the note");
-        age(&queue, 1);
         let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
         assert_eq!(
             waiter.message(),
@@ -721,27 +747,51 @@ mod tests {
         );
         drop(first);
         let _second = waiter.reported_turn();
-        assert_eq!(holder(&queue, 1), note("second"));
+        assert_eq!(holder(&queue, 1), name("second"));
+    }
+
+    /// A note is only a file, so anything may be in it.
+    #[test]
+    fn a_note_that_cannot_be_read_counts_for_nothing() {
+        let pid = process::id();
+        let own = platform::incarnation(pid).expect("this process");
+        assert!(Note::read(&format!("{pid} {own} 0\nname\n")).is_some());
+        for broken in [
+            String::new(),
+            format!("{pid} {own} 0"),
+            format!("{pid} {own}\nname\n"),
+            format!("{pid} {own} soon\nname\n"),
+            format!("{pid} {own} {}\nname\n", u64::MAX),
+            format!("pid {pid} in /work: name\n"),
+        ] {
+            assert!(Note::read(&broken).is_none(), "{broken:?}");
+        }
     }
 
     /// A run that ended without clearing its note leaves it for a sandboxed
     /// run that takes the slot next and cannot write its own; the note
-    /// neither names that run nor records its start.
+    /// neither names that run nor records its start. Nor does it when a
+    /// later process has the pid of the run that wrote it.
     #[test]
     fn a_note_from_a_run_that_ended_counts_for_nothing() {
-        let dir = queue_dir();
-        let queue = queue(&dir, 2);
-        let first = start(&queue, "first");
-        let stale = format!("pid {} in /work: gone\n", ended_pid());
-        fs::write(queue.holder_path(1), &stale).expect("leave a stale note");
-        age(&queue, 1);
-        let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
-        assert_eq!(
-            waiter.message(),
-            "waiting for another build (another run did not record when it started)"
-        );
-        drop(first);
-        let _second = waiter.reported_turn();
+        let own = platform::incarnation(process::id()).expect("this process");
+        let stale = [
+            format!("{} {own} 0\npid 1 in /work: gone\n", ended_pid()),
+            format!("{} another-{own} 0\npid 1 in /work: gone\n", process::id()),
+        ];
+        for stale in stale {
+            let dir = queue_dir();
+            let queue = queue(&dir, 2);
+            let first = start(&queue, "first");
+            fs::write(queue.holder_path(1), stale).expect("leave a stale note");
+            let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
+            assert_eq!(
+                waiter.message(),
+                "waiting for another build (another run did not record when it started)"
+            );
+            drop(first);
+            let _second = waiter.reported_turn();
+        }
     }
 
     #[test]
@@ -754,15 +804,11 @@ mod tests {
         let third = wait(&queue, "third", Duration::ZERO, Memory::Spare);
         assert_eq!(
             third.message(),
-            format!(
-                "waiting for 2 runs: {}; {}",
-                shown("first"),
-                shown("second")
-            )
+            format!("waiting for 2 runs: {}; {}", name("first"), name("second"))
         );
         drop(first);
         let _third = third.reported_turn();
-        assert_eq!(holder(&queue, 1), note("third"));
+        assert_eq!(holder(&queue, 1), name("third"));
     }
 
     #[test]
@@ -771,7 +817,7 @@ mod tests {
         let queue = bare_queue(&dir);
         let first = start(&queue, "first");
         let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
-        assert_eq!(waiter.message(), format!("waiting for {}", shown("first")));
+        assert_eq!(waiter.message(), format!("waiting for {}", name("first")));
         assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
         drop(first);
         let _second = waiter.reported_turn();
@@ -793,7 +839,7 @@ mod tests {
         drop(wait(&queue, "second", Duration::ZERO, Memory::Spare).turn());
         set_up(&queue, 1).expect("shrink the queue");
         assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
-        assert_eq!(holder(&queue, 1), note("first"));
+        assert_eq!(holder(&queue, 1), name("first"));
         drop(first);
     }
 
@@ -828,8 +874,8 @@ mod tests {
         gate.lock().expect("hold the gate");
 
         let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
-        assert_eq!(waiter.message(), format!("waiting for {}", shown("first")));
-        waiter.until(&format!("s for {}", shown("first")));
+        assert_eq!(waiter.message(), format!("waiting for {}", name("first")));
+        waiter.until(&format!("s for {}", name("first")));
         drop(first);
         waiter.until("s for another build");
         drop(gate);

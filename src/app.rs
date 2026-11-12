@@ -118,7 +118,7 @@ fn holder_note(request: &Request) -> String {
         |directory| directory.display().to_string(),
     );
     format!(
-        "pid {} in {directory}: {}\n",
+        "pid {} in {directory}: {}",
         process::id(),
         child::describe(request)
     )

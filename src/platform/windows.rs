@@ -10,7 +10,7 @@ use std::ptr;
 
 use tokio::process::{Child, Command};
 use tokio::signal::windows::{CtrlBreak, CtrlC, ctrl_break, ctrl_c};
-use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -18,8 +18,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::{
-    BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
 use crate::failure::Failure;
@@ -104,21 +104,38 @@ pub fn background(program: OsString) -> Result<Command, Failure> {
     Ok(command)
 }
 
-/// Whether the process with this pid is known to be running: false once it
-/// has exited, even while handles keep it around, and when it cannot be
-/// opened.
-pub fn is_running(pid: u32) -> bool {
+/// When the process was created, in the system's 100-nanosecond units.
+/// `None` once it has exited, even while handles keep it around, and when
+/// it cannot be opened.
+pub fn incarnation(pid: u32) -> Option<String> {
+    let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
     // SAFETY: OpenProcess takes plain values and returns null on failure.
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    let process = unsafe { OpenProcess(access, 0, pid) };
     if process.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: `process` is a valid handle with synchronize access; a zero
     // timeout only reads whether the process has exited.
-    let waited = unsafe { WaitForSingleObject(process, 0) };
+    let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
+    let mut created = FILETIME::default();
+    let mut unused = [FILETIME::default(); 3];
+    // SAFETY: `process` is a valid handle with query access, and the four
+    // pointers are to writable FILETIMEs.
+    let read = unsafe {
+        GetProcessTimes(
+            process,
+            &raw mut created,
+            &raw mut unused[0],
+            &raw mut unused[1],
+            &raw mut unused[2],
+        )
+    } != 0;
     // SAFETY: `process` is a valid handle that is not used again.
     unsafe { CloseHandle(process) };
-    waited == WAIT_TIMEOUT
+    (running && read).then(|| {
+        let created = u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime);
+        created.to_string()
+    })
 }
 
 /// Spare when at least a quarter of physical memory is available.
@@ -144,13 +161,13 @@ mod tests {
 
     /// `Child` keeps its handle after `wait`, so the process object stays.
     #[test]
-    fn an_exited_process_is_not_running_while_a_handle_keeps_it() {
+    fn a_process_that_exited_has_no_incarnation_while_a_handle_keeps_it() {
         let mut child = Command::new(env::current_exe().expect("this executable"))
             .arg("--list")
             .stdout(Stdio::null())
             .spawn()
             .expect("start a process");
         child.wait().expect("wait for it");
-        assert!(!is_running(child.id()));
+        assert_eq!(incarnation(child.id()), None);
     }
 }
