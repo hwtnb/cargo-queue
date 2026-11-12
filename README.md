@@ -33,6 +33,16 @@ cargo-queue --setup
 Runs inside a sandbox that cannot write to `~/.cache`, such as Codex's
 `workspace-write` mode, need these files to exist already. It runs nothing.
 
+A sandboxed run queues with those files alone, but it cannot write its note,
+so waiting runs cannot name it and no other run starts beside it. To let it
+write the note, make the queue directory writable in the sandbox. For Codex,
+in `~/.codex/config.toml`:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = ["~/.cache/cargo-queue"]
+```
+
 To let several builds go at once while memory allows, give the queue that
 many slots:
 
