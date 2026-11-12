@@ -21,8 +21,8 @@ pub fn trials() -> Vec<Trial> {
         the_note_names_cargo_without_its_path,
         the_command_form_skips_the_subcommand_name,
         help_version_and_usage_errors,
-        an_invalid_maximum_is_a_usage_error,
-        setup_creates_every_file_and_runs_nothing,
+        setup_takes_a_number_of_slots,
+        setup_sets_the_slots_and_runs_nothing,
     ]
 }
 
@@ -214,42 +214,48 @@ fn help_version_and_usage_errors() {
     );
 }
 
-fn an_invalid_maximum_is_a_usage_error() {
+fn setup_takes_a_number_of_slots() {
     let fixture = Fixture::new();
-    for max in ["0", "two", "-1"] {
-        let mut command = fixture.child("exit", &["0"]);
-        command.env("CARGO_QUEUE_MAX_RUNS", max);
-        let run = Run::start(command).finish();
-        assert_eq!(run.status.code(), Some(2), "{max}");
+    for slots in ["0", "two", "-1"] {
+        let run = fixture.start(&["--setup", slots]).finish();
+        assert_eq!(run.status.code(), Some(2), "{slots}");
         assert_eq!(
             run.stderr,
             [format!(
-                "cargo-queue: CARGO_QUEUE_MAX_RUNS must be a positive whole number, not {max}"
+                "cargo-queue: --setup takes a number of slots from 1 up, not {slots}"
             )]
         );
     }
 }
 
-fn setup_creates_every_file_and_runs_nothing() {
+fn setup_sets_the_slots_and_runs_nothing() {
     let fixture = Fixture::new();
     let queue = fixture.queue();
+    let files = || {
+        let mut files: Vec<_> = fs::read_dir(&queue)
+            .expect("list the queue")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        files.sort();
+        files
+    };
     for _ in 0..2 {
-        let mut command = fixture.cargo_queue(&["queue", "--setup"]);
-        command.env("CARGO_QUEUE_MAX_RUNS", "3");
-        let run = Run::start(command).finish();
+        let run = fixture.start(&["queue", "--setup", "3"]).finish();
         assert!(run.status.success(), "{:?}", run.stderr);
         assert_eq!(
             run.stdout,
-            [format!(
-                "cargo-queue: created {} with 3 slots",
-                queue.display()
-            )]
+            [format!("cargo-queue: {} has 3 slots", queue.display())]
         );
     }
-    let mut files: Vec<_> = fs::read_dir(&queue)
-        .expect("list the queue")
-        .map(|entry| entry.expect("an entry").file_name())
-        .collect();
-    files.sort();
-    assert_eq!(files, ["1.lock", "2.lock", "3.lock", "gate.lock"]);
+    assert_eq!(files(), ["1.lock", "2.lock", "3.lock", "gate.lock"]);
+
+    // Slot 1 stays, so its run does not stand in the way.
+    let (holder, _) = fixture.hold(&[]);
+    let run = fixture.start(&["--setup"]).finish();
+    assert_eq!(
+        run.stdout,
+        [format!("cargo-queue: {} has 1 slot", queue.display())]
+    );
+    assert_eq!(files(), ["1.holder", "1.lock", "gate.lock"]);
+    assert!(holder.finish().status.success());
 }

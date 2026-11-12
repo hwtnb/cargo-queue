@@ -31,16 +31,27 @@ cargo-queue --setup
 ```
 
 Runs inside a sandbox that cannot write to `~/.cache`, such as Codex's
-`workspace-write` mode, need these files to exist already. Run it again after
-raising `CARGO_QUEUE_MAX_RUNS`, so that sandboxed runs can use the new slots
-too. It runs nothing, and running it again is harmless.
+`workspace-write` mode, need these files to exist already. It runs nothing.
+
+To let several builds go at once while memory allows, give the queue that
+many slots:
+
+```bash
+cargo-queue --setup 2
+```
+
+The slots belong to the queue, so every run on the machine uses them without
+further settings. `cargo-queue --setup` without a number goes back to one
+slot, which is also what a queue has before any setup. While a slot it would
+remove is in use, it changes nothing and says so; run it again when that run
+has ended.
 
 ## Usage
 
 ```text
 cargo queue [--background] <cargo arguments...>
 cargo-queue [--background] -- <command...>
-cargo-queue --setup | --help | --version
+cargo-queue --setup [<slots>] | --help | --version
 ```
 
 The first form runs Cargo: `$CARGO`, which Cargo sets for its subcommands, or
@@ -63,8 +74,7 @@ cargo-queue: still waiting after 120s for pid 5150 in /home/me/third-project: ca
 cargo-queue: started after 137s
 ```
 
-When `CARGO_QUEUE_MAX_RUNS` allows several runs at once, a waiting run lists
-every run it waits for, and says why when a slot is free but it still may not
+When the queue has several slots, a waiting run lists every run it waits for, and says why when a slot is free but it still may not
 start:
 
 ```text
@@ -86,7 +96,7 @@ through `cargo-queue -- <command>`."
 |---|---|
 | `--background` | Lowers the command's priority. On macOS it runs under `taskpolicy -b`, on efficiency cores with low I/O priority, which can make builds much slower. On Windows it uses the below-normal priority class. Other systems reject it. |
 | `CARGO_QUEUE_DIR` | The directory that holds the queue's files. Defaults to `~/.cache/cargo-queue`. |
-| `CARGO_QUEUE_MAX_RUNS` | How many runs may go at once while memory allows, from 1 (the default) up. Set the same value for every run. |
+| `--setup [<slots>]` | Gives the queue that many slots, one without a number, and runs nothing. |
 | `CARGO_QUEUE_HELD` | Set to `1` for the command. A cargo-queue started inside it runs at once instead of waiting for its own ancestor. |
 
 ### Exit status
@@ -97,8 +107,8 @@ through `cargo-queue -- <command>`."
 | 128 + N | Signal N ended the command (Unix). |
 | 127 | The command was not found. |
 | 126 | The command could not be started. |
-| 2 | The arguments name no command, put a `+toolchain` after `queue`, ask for something this system does not support, or `CARGO_QUEUE_MAX_RUNS` is not a positive whole number. |
-| 1 | Another error, such as a lock file that cannot be created. |
+| 2 | The arguments name no command, put a `+toolchain` after `queue`, give `--setup` something other than a number from 1 up, or ask for something this system does not support. |
+| 1 | Another error, such as a lock file that cannot be created or a `--setup` that would remove a slot in use. |
 
 ## How it works
 
@@ -115,7 +125,7 @@ keeps other processes from reading the locked file.
 A run starts at once when no other run is running. Beside other runs, it
 starts only when all of the following hold:
 
-- one of the first `CARGO_QUEUE_MAX_RUNS` slots is free;
+- a slot is free;
 - every running run recorded a start at least 30 seconds ago, since a
   build's memory use grows after it starts. A run's start is when it wrote
   its note. A run that could not write its note, as in a sandbox, records
@@ -128,7 +138,8 @@ starts only when all of the following hold:
   inside Codex's sandbox, the run does not start beside others.
 
 A waiting run checks again four times a second. `gate.lock` keeps two runs
-from deciding at once. Runs that are already going are never paused.
+from deciding at once, and keeps `--setup` from changing the slots while one
+decides. Runs that are already going are never paused.
 
 On Unix, SIGINT, SIGTERM and SIGHUP are passed on to the command, and the lock
 is released only after the command has exited. On Windows, Ctrl-C and
@@ -139,8 +150,7 @@ cargo-queue opens the lock files read-only, which is all locking needs. A
 sandbox that denies writes to them, such as Codex's `workspace-write` mode,
 can therefore still take part, as long as `cargo-queue --setup` or another
 run outside the sandbox has created them. A holder that cannot write its note
-shows as "another build", and a slot whose lock file is missing is left
-unused.
+shows as "another build".
 
 ## Limitations
 

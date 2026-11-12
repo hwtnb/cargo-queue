@@ -2,6 +2,7 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 use std::process;
 
 use crate::child;
@@ -15,7 +16,7 @@ Run one heavy build at a time across projects on this machine.
 Usage:
   cargo queue [--background] <cargo arguments...>
   cargo-queue [--background] -- <command...>
-  cargo-queue --setup | --help | --version
+  cargo-queue --setup [<slots>] | --help | --version
 
 Waits for a lock in ~/.cache/cargo-queue (override with CARGO_QUEUE_DIR),
 then runs the command and releases the lock when it exits.
@@ -30,22 +31,24 @@ plain `cargo` calls do not take the lock. A nested call inside a queued command
 and SIGHUP are passed to the command, and the lock is released only after it
 exits. A command stopped with Ctrl-Z keeps the lock until it is resumed or ends.
 
-CARGO_QUEUE_MAX_RUNS=N (default 1) lets up to N runs go at once. A run with
-nothing else running always starts. Beside others, it starts only when each of
-them recorded in its note a start at least 30 seconds ago and memory is to
-spare; no run starts beside one that could not write its note.
+`cargo-queue --setup <slots>` sets how many runs may go at once, for every run
+on the machine, and runs nothing. Without a number it sets one slot, which is
+also what a queue has before any setup. It changes nothing while a slot it
+would remove is in use. A run with nothing else running always starts. Beside
+others, it starts only when a slot is free, each of them recorded in its note
+a start at least 30 seconds ago and memory is to spare; no run starts beside
+one that could not write its note.
 
 The lock files are only read, so a sandbox that denies writes to them (such as
 Codex's workspace-write mode) still queues, but the files must exist already:
-run `cargo-queue --setup` outside the sandbox after installing and after
-raising CARGO_QUEUE_MAX_RUNS. It creates them and runs nothing.
+run `cargo-queue --setup` outside the sandbox after installing.
 Waiters print the holders recorded in N.holder beside each N.lock, or \"another
 build\" when a holder could not record itself, and print them again every
 minute.
 
 Exit status: the command's own; 128+N if signal N ended it; 127 if it was not
-found; 126 if it could not be started; 2 for usage errors, including an
-invalid CARGO_QUEUE_MAX_RUNS and a +toolchain after `queue`; 1 for other errors.
+found; 126 if it could not be started; 2 for usage errors, including a
++toolchain after `queue`; 1 for other errors.
 ";
 
 /// Carries out the arguments after the program name and returns the exit
@@ -60,7 +63,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
             println!("cargo-queue {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Ok(Invocation::Setup) => set_up().unwrap_or_else(|failure| {
+        Ok(Invocation::Setup(slots)) => set_up(slots).unwrap_or_else(|failure| {
             eprintln!("cargo-queue: {failure}");
             failure.code
         }),
@@ -70,6 +73,13 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
         }),
         Err(UsageError::NoCommand) => {
             eprint!("{HELP}");
+            Failure::USAGE
+        }
+        Err(UsageError::Slots(slots)) => {
+            eprintln!(
+                "cargo-queue: --setup takes a number of slots from 1 up, not {}",
+                slots.display()
+            );
             Failure::USAGE
         }
         Err(UsageError::Toolchain(toolchain)) => {
@@ -82,10 +92,11 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
     }
 }
 
-fn set_up() -> Result<i32, Failure> {
+fn set_up(slots: NonZeroU32) -> Result<i32, Failure> {
     let queue = Queue::from_env()?;
-    queue.set_up()?;
-    println!("cargo-queue: created {queue}");
+    queue.set_up(slots)?;
+    let noun = if slots.get() == 1 { "slot" } else { "slots" };
+    println!("cargo-queue: {} has {slots} {noun}", queue.dir().display());
     Ok(0)
 }
 

@@ -1,5 +1,5 @@
 //! The command line: `[queue] [--background] (-- <command...> | <cargo arguments...>)`,
-//! or one of `--setup`, `--help` and `--version`.
+//! or one of `--setup [slots]`, `--help` and `--version`.
 //!
 //! Only the leading options belong to cargo-queue. Everything from the first
 //! other argument on goes to Cargo unchanged, so `cargo queue test --help`
@@ -7,14 +7,15 @@
 
 use std::ffi::OsString;
 use std::iter;
+use std::num::NonZeroU32;
 
 /// What one run of cargo-queue was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Help,
     Version,
-    /// Create the queue's files without running anything.
-    Setup,
+    /// Give the queue this many slots without running anything.
+    Setup(NonZeroU32),
     Run(Request),
 }
 
@@ -44,6 +45,8 @@ pub enum Program {
 pub enum UsageError {
     /// The arguments name no command to run.
     NoCommand,
+    /// What follows `--setup` is not a number of slots.
+    Slots(OsString),
     /// A `+toolchain` after `queue`. Only rustup's `cargo` understands it,
     /// and only as its own first argument.
     Toolchain(OsString),
@@ -62,7 +65,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Usa
             }
             Some("-h" | "--help") => return Ok(Invocation::Help),
             Some("-V" | "--version") => return Ok(Invocation::Version),
-            Some("--setup") => return Ok(Invocation::Setup),
+            Some("--setup") => {
+                let slots = match args.next() {
+                    None => NonZeroU32::MIN,
+                    Some(slots) => slots
+                        .to_str()
+                        .and_then(|slots| slots.parse().ok())
+                        .ok_or(UsageError::Slots(slots))?,
+                };
+                return match args.next() {
+                    None => Ok(Invocation::Setup(slots)),
+                    Some(_) => Err(UsageError::NoCommand),
+                };
+            }
             Some("--") => (
                 Program::Named(args.next().ok_or(UsageError::NoCommand)?),
                 args.collect(),
@@ -140,7 +155,8 @@ mod tests {
 
     #[test]
     fn leading_options_belong_to_cargo_queue() {
-        use Invocation::{Help, Setup, Version};
+        use Invocation::{Help, Version};
+        let setup = |slots| Ok(Invocation::Setup(NonZeroU32::new(slots).expect("a slot")));
         use Priority::{Background, Normal};
         let cases: &[(&[&str], Result<Invocation, UsageError>)] = &[
             (&["-h"], Ok(Help)),
@@ -148,8 +164,11 @@ mod tests {
             (&["-V"], Ok(Version)),
             (&["queue", "--version"], Ok(Version)),
             (&["--background", "--help"], Ok(Help)),
-            (&["--setup"], Ok(Setup)),
-            (&["queue", "--setup"], Ok(Setup)),
+            (&["--setup"], setup(1)),
+            (&["queue", "--setup", "3"], setup(3)),
+            (&["--setup", "0"], Err(UsageError::Slots("0".into()))),
+            (&["--setup", "many"], Err(UsageError::Slots("many".into()))),
+            (&["--setup", "2", "test"], Err(UsageError::NoCommand)),
             (
                 &["--background", "test"],
                 run(Background, Program::Cargo, &["test"]),

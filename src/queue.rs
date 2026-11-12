@@ -2,25 +2,28 @@
 //! go at once.
 //!
 //! The directory holds:
-//! - `N.lock`, held by the run in slot N for as long as its command runs;
+//! - `N.lock`, held by the run in slot N for as long as its command runs.
+//!   The slots that exist are the runs that may go at once, for every run
+//!   alike; `--setup` creates and removes them;
 //! - `N.holder`, the note naming that run for the runs that wait, written
 //!   when the run starts. A note counts only while the pid it names runs:
 //!   then it names the run in the slot, and its modification time is when
 //!   that run started. It is a separate file because Windows locks are
 //!   mandatory: while one process holds a lock, no other process can read
 //!   the locked file;
-//! - `gate.lock`, held while one run decides whether it may start, so no two
-//!   runs decide at once.
+//! - `gate.lock`, held while one run decides whether it may start or
+//!   `--setup` changes the slots, so no two of them act at once. A run lists
+//!   and opens the slots anew each time it holds the gate, so it never acts
+//!   on slots that `--setup` has removed.
 //!
 //! A run starts at once when no other run is running. Beside other runs, it
-//! needs a free slot among the first `CARGO_QUEUE_MAX_RUNS`, every running
-//! run to have recorded a start `ramp_up` ago or more, and memory to spare.
+//! needs a free slot, every running run to have recorded a start `ramp_up`
+//! ago or more, and memory to spare.
 //! A run that could not write its note, as in a sandbox, records no start,
 //! so no run starts beside it.
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
@@ -28,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::failure::Failure;
 use crate::platform::{self, Memory};
 
 /// How often the queue is checked, and how long to wait between checks.
@@ -57,13 +59,11 @@ const GATE_PATIENCE: Duration = Duration::from_millis(20);
 #[derive(Clone)]
 pub struct Queue {
     dir: PathBuf,
-    max_runs: u32,
 }
 
 impl Queue {
-    /// The queue in `CARGO_QUEUE_DIR`, or `~/.cache/cargo-queue`, with
-    /// `CARGO_QUEUE_MAX_RUNS` slots, or one.
-    pub fn from_env() -> Result<Self, Failure> {
+    /// The queue in `CARGO_QUEUE_DIR`, or `~/.cache/cargo-queue`.
+    pub fn from_env() -> io::Result<Self> {
         let dir = match env::var_os("CARGO_QUEUE_DIR").filter(|dir| !dir.is_empty()) {
             Some(dir) => PathBuf::from(dir),
             None => env::home_dir()
@@ -76,33 +76,73 @@ impl Queue {
                 .join(".cache")
                 .join("cargo-queue"),
         };
-        let max_runs = match env::var_os("CARGO_QUEUE_MAX_RUNS").filter(|max| !max.is_empty()) {
-            None => 1,
-            Some(max) => max
-                .to_str()
-                .and_then(|max| max.parse::<NonZeroU32>().ok())
-                .ok_or_else(|| {
-                    Failure::new(
-                        Failure::USAGE,
-                        format!(
-                            "CARGO_QUEUE_MAX_RUNS must be a positive whole number, not {}",
-                            max.display()
-                        ),
-                    )
-                })?
-                .get(),
-        };
-        Ok(Self { dir, max_runs })
+        Ok(Self { dir })
     }
 
-    /// Creates every file the queue needs up to this run's maximum, so runs
-    /// in a sandbox that cannot create them can still use every slot.
-    pub fn set_up(&self) -> io::Result<()> {
-        self.open_required("gate.lock")?;
-        for number in 1..=self.max_runs {
-            self.open_required(&format!("{number}.lock"))?;
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Makes the queue have exactly the slots 1 to `slots`, so that many
+    /// runs may go at once, and creates the files a sandboxed run cannot.
+    /// Changes nothing while a slot it would remove is in use: a slot left
+    /// behind would stay in use by later runs.
+    pub fn set_up(&self, slots: NonZeroU32) -> io::Result<()> {
+        let Some(_gate) = self.enter_gate()? else {
+            return Err(io::Error::other(format!(
+                "another run holds {}; try again",
+                self.dir.join("gate.lock").display()
+            )));
+        };
+        let surplus: Vec<u32> = self
+            .slot_numbers()?
+            .into_iter()
+            .filter(|&number| number > slots.get())
+            .collect();
+        let mut in_use = Vec::new();
+        for &number in &surplus {
+            // Dropping the file releases the lock again; the gate keeps
+            // other runs from taking the slot before it is removed.
+            match self.open_slot(number)?.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => in_use.push(number.to_string()),
+                Err(TryLockError::Error(error)) => return Err(error),
+            }
         }
-        Ok(())
+        if !in_use.is_empty() {
+            return Err(io::Error::other(format!(
+                "slot {} is in use, so nothing was changed; try again when its run has ended",
+                in_use.join(" and slot ")
+            )));
+        }
+        self.replace_slots(&surplus, slots.get()).map_err(|error| {
+            let left = self.slot_numbers().map_or_else(
+                |_| "unknown slots".to_owned(),
+                |numbers| {
+                    let numbers: Vec<_> = numbers.iter().map(u32::to_string).collect();
+                    format!("slots {}", numbers.join(", "))
+                },
+            );
+            io::Error::new(
+                error.kind(),
+                format!("{error}; {} now has {left}", self.dir.display()),
+            )
+        })
+    }
+
+    fn replace_slots(&self, surplus: &[u32], slots: u32) -> io::Result<()> {
+        for &number in surplus {
+            for path in [self.lock_path(number), self.holder_path(number)] {
+                match fs::remove_file(&path) {
+                    Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                        let message = format!("cannot remove {} ({error})", path.display());
+                        return Err(io::Error::new(error.kind(), message));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (1..=slots).try_for_each(|number| self.create_slot(number).map(drop))
     }
 
     /// Waits until this run may start, telling the user whom it waits for,
@@ -167,14 +207,18 @@ impl Queue {
         let Some(_gate) = self.enter_gate()? else {
             return Ok(Attempt::Busy);
         };
+        let mut numbers = self.slot_numbers()?;
+        if numbers.is_empty() {
+            // A queue nobody has set up has one slot.
+            self.create_slot(1)?;
+            numbers.insert(1);
+        }
         let mut free = None;
         let mut running = Vec::new();
-        for number in self.slot_numbers()? {
-            let Some(lock) = self.open_slot(number)? else {
-                continue;
-            };
+        for number in numbers {
+            let lock = self.open_slot(number)?;
             match lock.try_lock() {
-                Ok(()) if number <= self.max_runs && free.is_none() => free = Some((number, lock)),
+                Ok(()) if free.is_none() => free = Some((number, lock)),
                 // Dropping the file releases the lock again.
                 Ok(()) => {}
                 Err(TryLockError::WouldBlock) => running.push(number),
@@ -219,7 +263,7 @@ impl Queue {
 
     /// Takes `gate.lock` unless another run keeps it for `GATE_PATIENCE`.
     fn enter_gate(&self) -> io::Result<Option<File>> {
-        let gate = self.open_required("gate.lock")?;
+        let gate = open_or_create(&self.dir.join("gate.lock"))?;
         let deadline = Instant::now() + GATE_PATIENCE;
         loop {
             match gate.try_lock() {
@@ -278,9 +322,9 @@ impl Queue {
         Ok(format!("{holders}{reason}"))
     }
 
-    /// The slots up to this run's maximum, and any other run's beyond it.
+    /// The slots that exist.
     fn slot_numbers(&self) -> io::Result<BTreeSet<u32>> {
-        let mut numbers: BTreeSet<u32> = (1..=self.max_runs).collect();
+        let mut numbers = BTreeSet::new();
         for entry in fs::read_dir(&self.dir)? {
             let name = entry?.file_name();
             let number = name
@@ -293,53 +337,23 @@ impl Queue {
         Ok(numbers)
     }
 
-    /// Opens slot `number`'s lock. Slot 1 must exist, as every run needs it;
-    /// another slot that is missing and cannot be created, as in a sandbox,
-    /// is left out.
-    fn open_slot(&self, number: u32) -> io::Result<Option<File>> {
-        let name = format!("{number}.lock");
-        if number == 1 {
-            return self.open_required(&name).map(Some);
-        }
-        let path = self.dir.join(name);
-        match File::open(&path) {
-            Ok(lock) => Ok(Some(lock)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((number <= self.max_runs)
-                .then(|| create_lock(&path).ok())
-                .flatten()),
-            Err(error) => Err(cannot_open(&path, error)),
-        }
+    /// Opens the lock of a slot that exists; whoever holds the gate keeps
+    /// `--setup` from removing it meanwhile.
+    fn open_slot(&self, number: u32) -> io::Result<File> {
+        let path = self.lock_path(number);
+        File::open(&path).map_err(|error| cannot_open(&path, error))
     }
 
-    /// Opens a lock file read-only, which is all locking needs, so a sandbox
-    /// that denies writes to it still queues. Only a missing file needs
-    /// writes.
-    fn open_required(&self, name: &str) -> io::Result<File> {
-        let path = self.dir.join(name);
-        match File::open(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_lock(&path).map_err(|error| {
-                    let message = format!(
-                        "cannot create {} ({error}); run `cargo-queue --setup` once outside the sandbox",
-                        path.display()
-                    );
-                    io::Error::new(error.kind(), message)
-                })
-            }
-            result => result.map_err(|error| cannot_open(&path, error)),
-        }
+    fn create_slot(&self, number: u32) -> io::Result<File> {
+        open_or_create(&self.lock_path(number))
+    }
+
+    fn lock_path(&self, number: u32) -> PathBuf {
+        self.dir.join(format!("{number}.lock"))
     }
 
     fn holder_path(&self, number: u32) -> PathBuf {
         self.dir.join(format!("{number}.holder"))
-    }
-}
-
-/// The directory and how many slots it offers, as `--setup` reports them.
-impl fmt::Display for Queue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let slots = if self.max_runs == 1 { "slot" } else { "slots" };
-        write!(f, "{} with {} {slots}", self.dir.display(), self.max_runs)
     }
 }
 
@@ -407,7 +421,22 @@ impl Reason {
     }
 }
 
-fn create_lock(path: &Path) -> io::Result<File> {
+/// Opens a lock file read-only, which is all locking needs, so a sandbox
+/// that denies writes to it still queues. Only a missing file needs writes.
+fn open_or_create(path: &Path) -> io::Result<File> {
+    match File::open(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => create(path).map_err(|error| {
+            let message = format!(
+                "cannot create {} ({error}); run `cargo-queue --setup` once outside the sandbox",
+                path.display()
+            );
+            io::Error::new(error.kind(), message)
+        }),
+        result => result.map_err(|error| cannot_open(path, error)),
+    }
+}
+
+fn create(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -452,11 +481,36 @@ mod tests {
         tempfile::tempdir().expect("create a temporary directory")
     }
 
-    fn queue(dir: &TempDir, max_runs: u32) -> Queue {
+    /// A queue nobody has set up.
+    fn bare_queue(dir: &TempDir) -> Queue {
         Queue {
             dir: dir.path().join("queue"),
-            max_runs,
         }
+    }
+
+    fn queue(dir: &TempDir, slots: u32) -> Queue {
+        let queue = bare_queue(dir);
+        set_up(&queue, slots).expect("set up the queue");
+        queue
+    }
+
+    fn set_up(queue: &Queue, slots: u32) -> io::Result<()> {
+        queue.set_up(NonZeroU32::new(slots).expect("at least one slot"))
+    }
+
+    fn files(queue: &Queue) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(&queue.dir)
+            .expect("list the queue")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .into_string()
+                    .expect("a UTF-8 name")
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     fn timing(ramp_up: Duration) -> Timing {
@@ -712,19 +766,55 @@ mod tests {
     }
 
     #[test]
-    fn a_run_counts_the_slots_beyond_its_own_maximum() {
+    fn a_queue_nobody_set_up_has_one_slot() {
         let dir = queue_dir();
-        let first = start(&queue(&dir, 2), "first");
-        let second = wait(&queue(&dir, 2), "second", Duration::ZERO, Memory::Spare).turn();
+        let queue = bare_queue(&dir);
+        let first = start(&queue, "first");
+        let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);
+        assert_eq!(waiter.message(), format!("waiting for {}", shown("first")));
+        assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
         drop(first);
+        let _second = waiter.reported_turn();
+    }
 
-        let waiter = wait(&queue(&dir, 1), "third", Duration::ZERO, Memory::Tight);
+    #[test]
+    fn setup_makes_the_slots_it_is_asked_for() {
+        let dir = queue_dir();
+        let queue = bare_queue(&dir);
+        fs::create_dir(&queue.dir).expect("create the queue");
+        fs::write(queue.lock_path(3), "").expect("leave a gap before slot 3");
+        set_up(&queue, 4).expect("grow the queue");
         assert_eq!(
-            waiter.message(),
-            format!("waiting for {} (memory is under pressure)", shown("second"))
+            files(&queue),
+            ["1.lock", "2.lock", "3.lock", "4.lock", "gate.lock"]
         );
+
+        let first = start(&queue, "first");
+        drop(wait(&queue, "second", Duration::ZERO, Memory::Spare).turn());
+        set_up(&queue, 1).expect("shrink the queue");
+        assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
+        assert_eq!(holder(&queue, 1), note("first"));
+        drop(first);
+    }
+
+    /// A slot left behind would keep letting a second run go.
+    #[test]
+    fn setup_changes_nothing_while_a_slot_it_would_remove_is_in_use() {
+        let dir = queue_dir();
+        let queue = queue(&dir, 3);
+        let _first = start(&queue, "first");
+        let second = wait(&queue, "second", Duration::ZERO, Memory::Spare).turn();
+        let before = files(&queue);
+
+        let error = set_up(&queue, 1).expect_err("slot 2 is in use");
+        assert_eq!(
+            error.to_string(),
+            "slot 2 is in use, so nothing was changed; try again when its run has ended"
+        );
+        assert_eq!(files(&queue), before);
         drop(second);
-        let _third = waiter.reported_turn();
+        set_up(&queue, 1).expect("shrink the queue");
+        assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
     }
 
     /// A run stopped while it decides keeps the gate; the others still say
@@ -734,7 +824,7 @@ mod tests {
         let dir = queue_dir();
         let queue = queue(&dir, 1);
         let first = start(&queue, "first");
-        let gate = queue.open_required("gate.lock").expect("open the gate");
+        let gate = open_or_create(&queue.dir.join("gate.lock")).expect("open the gate");
         gate.lock().expect("hold the gate");
 
         let waiter = wait(&queue, "second", Duration::ZERO, Memory::Spare);

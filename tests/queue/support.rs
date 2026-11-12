@@ -65,8 +65,7 @@ impl Fixture {
             .env("CARGO_QUEUE_DIR", self.queue())
             // Set when the tests themselves run under `cargo queue test`, or
             // in the environment of whoever runs them.
-            .env_remove("CARGO_QUEUE_HELD")
-            .env_remove("CARGO_QUEUE_MAX_RUNS");
+            .env_remove("CARGO_QUEUE_HELD");
         command
     }
 

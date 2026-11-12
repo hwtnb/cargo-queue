@@ -12,28 +12,29 @@ are interfaces. Change them only with agreement on concrete before/after
 examples, and update README with them.
 
 - Invocation: `cargo queue [--background] <cargo arguments...>` and
-  `cargo-queue [--background] -- <command...>`, and `cargo-queue --setup`
-  to create the queue's files. Only leading options belong
+  `cargo-queue [--background] -- <command...>`, and
+  `cargo-queue --setup [<slots>]` to set how many runs may go at once, one
+  without a number. Only leading options belong
   to cargo-queue; everything from the first other argument on reaches Cargo
   unchanged.
 - Environment: `CARGO_QUEUE_DIR` names the queue directory,
-  `CARGO_QUEUE_MAX_RUNS` how many runs may go at once while memory allows,
   `CARGO_QUEUE_HELD=1` marks a nested call, and `CARGO` names the Cargo to
   run. Everything else
   passes through to the command unchanged. On macOS, SIP removes `DYLD_*`
   variables when a protected binary such as `/usr/bin/env` or `/bin/sh`
   starts; never start the command through one, or a directly invoked `$CARGO`
   loses rustup's library path.
-- Files: the queue directory holds `N.lock` per slot and `gate.lock`. Lock
-  files are only opened and locked, never written. The holder note
+- Files: the queue directory holds `N.lock` per slot and `gate.lock`. The
+  slots that exist are the runs that may go at once; only `--setup` removes
+  them, and a run creates slot 1 when there is none. Lock files are only
+  opened and locked, never written. The holder note
   `pid <PID> in <cwd>: <command>` lives in `N.holder`. It counts only while
   that pid runs: then it names the run, and its modification time is when
   the run started.
 - Messages: the "waiting for", "still waiting after" and "started after"
   lines on stderr, as README shows them.
 - Exit codes: the command's own; 128+N for signal N; 127 when the command is
-  not found; 126 when it cannot be started; 2 for usage errors, including an
-  invalid `CARGO_QUEUE_MAX_RUNS`; 1 otherwise.
+  not found; 126 when it cannot be started; 2 for usage errors; 1 otherwise.
 
 ## Code layout
 
@@ -73,8 +74,7 @@ examples, and update README with them.
   in `unix.rs` or `windows.rs`; only Unix signal tests script commands with
   `sh`.
 - Tests run the built binary with a private `CARGO_QUEUE_DIR` and remove
-  `CARGO_QUEUE_HELD`, which `cargo queue test` sets, and
-  `CARGO_QUEUE_MAX_RUNS`. Order events through
+  `CARGO_QUEUE_HELD`, which `cargo queue test` sets. Order events through
   pipes and the "waiting for" line, never sleeps; the first launch of a fresh
   binary can take most of a second.
 - Never point a development build at the real queue directory. Check sandbox
