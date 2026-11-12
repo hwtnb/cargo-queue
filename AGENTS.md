@@ -14,7 +14,8 @@ examples, and update README with them.
 - Invocation: `cargo queue [--background] <cargo arguments...>` and
   `cargo-queue [--background] -- <command...>`, and
   `cargo-queue --setup [<slots>]` to set how many runs may go at once, one
-  without a number. Only leading options belong
+  without a number, and `cargo-queue --status` to print the queue's state.
+  Only leading options belong
   to cargo-queue; everything from the first other argument on reaches Cargo
   unchanged.
 - Environment: `CARGO_QUEUE_DIR` names the queue directory,
@@ -32,7 +33,9 @@ examples, and update README with them.
   `pid <PID> in <cwd>: <command>`, which waiting runs print. It counts only
   while the process with that pid and incarnation runs.
 - Messages: the "waiting for", "still waiting after" and "started after"
-  lines on stderr, as README shows them.
+  lines on stderr and the lines of `--status` on stdout, as README shows
+  them. `--status` judges a new run with the code a real run uses; keep it
+  so.
 - Exit codes: the command's own; 128+N for signal N; 127 when the command is
   not found; 126 when it cannot be started; 2 for usage errors; 1 otherwise.
 

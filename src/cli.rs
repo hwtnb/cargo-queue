@@ -1,5 +1,5 @@
 //! The command line: `[queue] [--background] (-- <command...> | <cargo arguments...>)`,
-//! or one of `--setup [slots]`, `--help` and `--version`.
+//! or one of `--setup [slots]`, `--status`, `--help` and `--version`.
 //!
 //! Only the leading options belong to cargo-queue. Everything from the first
 //! other argument on goes to Cargo unchanged, so `cargo queue test --help`
@@ -16,6 +16,8 @@ pub enum Invocation {
     Version,
     /// Give the queue this many slots without running anything.
     Setup(NonZeroU32),
+    /// Show the queue as a new run would find it.
+    Status,
     Run(Request),
 }
 
@@ -65,6 +67,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Usa
             }
             Some("-h" | "--help") => return Ok(Invocation::Help),
             Some("-V" | "--version") => return Ok(Invocation::Version),
+            Some("--status") => return Ok(Invocation::Status),
             Some("--setup") => {
                 let slots = match args.next() {
                     None => NonZeroU32::MIN,
@@ -155,7 +158,7 @@ mod tests {
 
     #[test]
     fn leading_options_belong_to_cargo_queue() {
-        use Invocation::{Help, Version};
+        use Invocation::{Help, Status, Version};
         let setup = |slots| Ok(Invocation::Setup(NonZeroU32::new(slots).expect("a slot")));
         use Priority::{Background, Normal};
         let cases: &[(&[&str], Result<Invocation, UsageError>)] = &[
@@ -164,6 +167,8 @@ mod tests {
             (&["-V"], Ok(Version)),
             (&["queue", "--version"], Ok(Version)),
             (&["--background", "--help"], Ok(Help)),
+            (&["--status"], Ok(Status)),
+            (&["queue", "--status"], Ok(Status)),
             (&["--setup"], setup(1)),
             (&["queue", "--setup", "3"], setup(3)),
             (&["--setup", "0"], Err(UsageError::Slots("0".into()))),

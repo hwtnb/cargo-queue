@@ -16,7 +16,7 @@ Run one heavy build at a time across projects on this machine.
 Usage:
   cargo queue [--background] <cargo arguments...>
   cargo-queue [--background] -- <command...>
-  cargo-queue --setup [<slots>] | --help | --version
+  cargo-queue --setup [<slots>] | --status | --help | --version
 
 Waits for a lock in ~/.cache/cargo-queue (override with CARGO_QUEUE_DIR),
 then runs the command and releases the lock when it exits.
@@ -39,6 +39,10 @@ others, it starts only when a slot is free, each of them recorded in its note
 a start at least 30 seconds ago and memory is to spare; no run starts beside
 one that could not write its note.
 
+`cargo-queue --status` prints who holds each slot and for how long, what the
+memory check says, and whether a run started now would start or wait. It
+changes nothing and reserves nothing.
+
 The lock files are only read, so a sandbox that denies writes to them (such as
 Codex's workspace-write mode) still queues, but the files must exist already:
 run `cargo-queue --setup` outside the sandbox after installing.
@@ -54,42 +58,41 @@ found; 126 if it could not be started; 2 for usage errors, including a
 /// Carries out the arguments after the program name and returns the exit
 /// code. Everything that cleans up on drop is gone when this returns.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
-    match cli::parse(args) {
+    let outcome = match cli::parse(args) {
         Ok(Invocation::Help) => {
             print!("{HELP}");
-            0
+            Ok(0)
         }
         Ok(Invocation::Version) => {
             println!("cargo-queue {}", env!("CARGO_PKG_VERSION"));
-            0
+            Ok(0)
         }
-        Ok(Invocation::Setup(slots)) => set_up(slots).unwrap_or_else(|failure| {
-            eprintln!("cargo-queue: {failure}");
-            failure.code
-        }),
-        Ok(Invocation::Run(request)) => queue_and_run(request).unwrap_or_else(|failure| {
-            eprintln!("cargo-queue: {failure}");
-            failure.code
-        }),
+        Ok(Invocation::Setup(slots)) => set_up(slots),
+        Ok(Invocation::Status) => status(),
+        Ok(Invocation::Run(request)) => queue_and_run(request),
         Err(UsageError::NoCommand) => {
             eprint!("{HELP}");
-            Failure::USAGE
+            return Failure::USAGE;
         }
-        Err(UsageError::Slots(slots)) => {
-            eprintln!(
-                "cargo-queue: --setup takes a number of slots from 1 up, not {}",
+        Err(UsageError::Slots(slots)) => Err(Failure::new(
+            Failure::USAGE,
+            format!(
+                "--setup takes a number of slots from 1 up, not {}",
                 slots.display()
-            );
-            Failure::USAGE
-        }
+            ),
+        )),
         Err(UsageError::Toolchain(toolchain)) => {
             let toolchain = toolchain.display();
-            eprintln!(
-                "cargo-queue: write `cargo {toolchain} queue ...`, not `cargo queue {toolchain} ...`"
-            );
-            Failure::USAGE
+            Err(Failure::new(
+                Failure::USAGE,
+                format!("write `cargo {toolchain} queue ...`, not `cargo queue {toolchain} ...`"),
+            ))
         }
-    }
+    };
+    outcome.unwrap_or_else(|failure| {
+        eprintln!("cargo-queue: {failure}");
+        failure.code
+    })
 }
 
 fn set_up(slots: NonZeroU32) -> Result<i32, Failure> {
@@ -97,6 +100,11 @@ fn set_up(slots: NonZeroU32) -> Result<i32, Failure> {
     queue.set_up(slots)?;
     let noun = if slots.get() == 1 { "slot" } else { "slots" };
     println!("cargo-queue: {} has {slots} {noun}", queue.dir().display());
+    Ok(0)
+}
+
+fn status() -> Result<i32, Failure> {
+    println!("{}", Queue::from_env()?.status()?);
     Ok(0)
 }
 

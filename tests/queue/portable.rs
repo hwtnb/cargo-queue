@@ -21,6 +21,7 @@ pub fn trials() -> Vec<Trial> {
         the_note_names_cargo_without_its_path,
         the_command_form_skips_the_subcommand_name,
         help_version_and_usage_errors,
+        status_shows_the_queue_and_changes_nothing,
         setup_takes_a_number_of_slots,
         setup_sets_the_slots_and_runs_nothing,
     ]
@@ -214,6 +215,38 @@ fn help_version_and_usage_errors() {
         !fixture.lock().exists(),
         "no lock is taken without a command"
     );
+}
+
+fn status_shows_the_queue_and_changes_nothing() {
+    let fixture = Fixture::new();
+    let at = format!("queue: {}", fixture.queue().display());
+    let fresh = fixture.start(&["queue", "--status"]).finish();
+    assert!(fresh.status.success(), "{:?}", fresh.stderr);
+    assert_eq!(fresh.stdout[0], at);
+    assert_eq!(
+        fresh.stdout.last().map(String::as_str),
+        Some("a new run would set the queue up with one slot and start")
+    );
+    assert!(!fixture.lock().exists(), "status creates nothing");
+
+    let (holder, held) = fixture.hold(&[]);
+    let status = fixture.start(&["--status"]).finish();
+    assert!(status.status.success(), "{:?}", status.stderr);
+    let slot = format!(
+        "slot 1: pid {} in {}: {} (held for ",
+        holder.pid(),
+        held.cwd,
+        child_exe()
+    );
+    assert_eq!(status.stdout[0], at);
+    assert!(status.stdout[1].starts_with(&slot), "{:?}", status.stdout);
+    assert!(
+        status.stdout[2].starts_with("memory: "),
+        "{:?}",
+        status.stdout
+    );
+    assert_eq!(status.stdout[3], "a new run would wait for a free slot");
+    assert!(holder.finish().status.success());
 }
 
 fn setup_takes_a_number_of_slots() {

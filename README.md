@@ -61,7 +61,7 @@ has ended.
 ```text
 cargo queue [--background] <cargo arguments...>
 cargo-queue [--background] -- <command...>
-cargo-queue --setup [<slots>] | --help | --version
+cargo-queue --setup [<slots>] | --status | --help | --version
 ```
 
 The first form runs Cargo: `$CARGO`, which Cargo sets for its subcommands, or
@@ -95,6 +95,23 @@ cargo-queue: waiting for another build (another run did not record when it start
 cargo-queue: waiting for pid 4242 in /home/me/a: cargo clippy (another run is still starting)
 ```
 
+`cargo-queue --status` shows the queue without joining it: who holds each
+slot and for how long, what the memory check says, and what a run started now
+would do. It is useful when a command's output is filtered and the waiting
+lines are lost.
+
+```text
+$ cargo-queue --status
+queue: /home/me/.cache/cargo-queue
+slot 1: pid 4242 in /home/me/a: cargo test -j 2 (held for 3m12s)
+slot 2: free
+memory: under pressure
+a new run would wait (memory is under pressure)
+```
+
+The last line is true for that moment only; nothing is reserved. When another
+run holds `gate.lock` just then, it says that a new run cannot be judged.
+
 Only commands started through cargo-queue take turns. To make coding agents use
 it, say so in their instructions, for example: "Run Cargo build, check, clippy,
 test and run commands through `cargo queue`, and scripts that call Cargo
@@ -107,6 +124,7 @@ through `cargo-queue -- <command>`."
 | `--background` | Lowers the command's priority. On macOS it runs under `taskpolicy -b`, on efficiency cores with low I/O priority, which can make builds much slower. On Windows it uses the below-normal priority class. Other systems reject it. |
 | `CARGO_QUEUE_DIR` | The directory that holds the queue's files. Defaults to `~/.cache/cargo-queue`. |
 | `--setup [<slots>]` | Gives the queue that many slots, one without a number, and runs nothing. |
+| `--status` | Prints the slots, the memory check and what a new run would do. Creates and changes nothing. |
 | `CARGO_QUEUE_HELD` | Set to `1` for the command. A cargo-queue started inside it runs at once instead of waiting for its own ancestor. |
 
 ### Exit status

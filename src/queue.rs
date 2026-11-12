@@ -215,9 +215,32 @@ impl Queue {
             self.create_slot(1)?;
             numbers.insert(1);
         }
+        let Judgment { running, free } = self.judge(&numbers, ramp_up, memory)?;
+        Ok(match free {
+            // Written before the gate opens, so the next run to decide sees
+            // when this one started.
+            Ok((number, lock)) => Attempt::Started(Turn {
+                holder: write_holder(&self.holder_path(number), name),
+                _lock: lock,
+            }),
+            Err(reason) => Attempt::Blocked(Blocked {
+                slots: running,
+                reason,
+            }),
+        })
+    }
+
+    /// Finds the running runs and a slot a new run may take beside them
+    /// now. Only for whoever holds the gate.
+    fn judge(
+        &self,
+        numbers: &BTreeSet<u32>,
+        ramp_up: Duration,
+        memory: &mut impl FnMut() -> Memory,
+    ) -> io::Result<Judgment> {
         let mut free = None;
         let mut running = Vec::new();
-        for number in numbers {
+        for &number in numbers {
             let lock = self.open_slot(number)?;
             match lock.try_lock() {
                 Ok(()) if free.is_none() => free = Some((number, lock)),
@@ -227,56 +250,106 @@ impl Queue {
                 Err(TryLockError::Error(error)) => return Err(error),
             }
         }
-        let blocked = |reason| {
-            Ok(Attempt::Blocked(Blocked {
-                slots: running.clone(),
-                reason,
-            }))
-        };
-        let Some((number, lock)) = free else {
-            return blocked(Reason::Full);
-        };
-        if !running.is_empty() {
-            let Some(latest) = running
+        let reason = if free.is_none() {
+            Some(Reason::Full)
+        } else if running.is_empty() {
+            None
+        } else {
+            let starts: Option<Vec<_>> = running
                 .iter()
                 .map(|&number| self.note(number).map(|note| note.started))
-                .collect::<Option<Vec<_>>>()
-                .and_then(|starts| starts.into_iter().max())
-            else {
-                return blocked(Reason::Unrecorded);
-            };
-            // A start time ahead of the clock counts as just now.
-            if SystemTime::now().duration_since(latest).unwrap_or_default() < ramp_up {
-                return blocked(Reason::Starting);
+                .collect();
+            match starts.and_then(|starts| starts.into_iter().max()) {
+                None => Some(Reason::Unrecorded),
+                // A start time ahead of the clock counts as just now.
+                Some(latest)
+                    if SystemTime::now().duration_since(latest).unwrap_or_default() < ramp_up =>
+                {
+                    Some(Reason::Starting)
+                }
+                Some(_) => match memory() {
+                    Memory::Spare => None,
+                    Memory::Tight => Some(Reason::Tight),
+                    Memory::Unknown => Some(Reason::Unknown),
+                },
             }
-            match memory() {
-                Memory::Spare => {}
-                Memory::Tight => return blocked(Reason::Tight),
-                Memory::Unknown => return blocked(Reason::Unknown),
-            }
-        }
-        // Written before the gate opens, so the next run to decide sees
-        // when this one started.
-        Ok(Attempt::Started(Turn {
-            holder: write_holder(&self.holder_path(number), name),
-            _lock: lock,
-        }))
+        };
+        let free = match (reason, free) {
+            (None, Some(free)) => Ok(free),
+            (Some(reason), _) => Err(reason),
+            (None, None) => unreachable!("a queue without a free slot is full"),
+        };
+        Ok(Judgment { running, free })
     }
 
-    /// Takes `gate.lock` unless another run keeps it for `GATE_PATIENCE`.
-    fn enter_gate(&self) -> io::Result<Option<File>> {
-        let gate = open_or_create(&self.dir.join("gate.lock"))?;
-        let deadline = Instant::now() + GATE_PATIENCE;
-        loop {
-            match gate.try_lock() {
-                Ok(()) => return Ok(Some(gate)),
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(TryLockError::WouldBlock) => return Ok(None),
-                Err(TryLockError::Error(error)) => return Err(error),
+    /// The queue as a new run would find it, for `--status`. Creates
+    /// nothing and keeps no lock.
+    pub fn status(&self) -> io::Result<String> {
+        self.report(Timing::REAL.ramp_up, platform::memory())
+    }
+
+    fn report(&self, ramp_up: Duration, memory: Memory) -> io::Result<String> {
+        let mut lines = vec![format!("queue: {}", self.dir.display())];
+        let memory_line = match memory {
+            Memory::Spare => "memory: to spare",
+            Memory::Tight => "memory: under pressure",
+            Memory::Unknown => "memory: unavailable",
+        };
+        let verdict = match self.inspect(&mut lines, ramp_up, memory)? {
+            Inspection::NotSetUp => "would set the queue up with one slot and start".to_owned(),
+            Inspection::Busy => "cannot be judged now: another run holds gate.lock".to_owned(),
+            Inspection::Judged(None) => "would start".to_owned(),
+            Inspection::Judged(Some(Reason::Full)) => "would wait for a free slot".to_owned(),
+            Inspection::Judged(Some(reason)) => format!("would wait{}", reason.suffix()),
+        };
+        lines.extend([memory_line.to_owned(), format!("a new run {verdict}")]);
+        Ok(lines.join("\n"))
+    }
+
+    /// Adds a line per slot to `lines` and judges a new run, as far as the
+    /// queue can be read without creating anything.
+    fn inspect(
+        &self,
+        lines: &mut Vec<String>,
+        ramp_up: Duration,
+        memory: Memory,
+    ) -> io::Result<Inspection> {
+        let path = self.dir.join("gate.lock");
+        let gate = match File::open(&path) {
+            Ok(gate) => gate,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Inspection::NotSetUp);
             }
+            Err(error) => return Err(cannot_open(&path, error)),
+        };
+        let Some(_gate) = keep_gate(gate)? else {
+            return Ok(Inspection::Busy);
+        };
+        let numbers = self.slot_numbers()?;
+        if numbers.is_empty() {
+            return Ok(Inspection::NotSetUp);
         }
+        let Judgment { running, free } = self.judge(&numbers, ramp_up, &mut || memory)?;
+        for number in numbers {
+            let state = if !running.contains(&number) {
+                "free".to_owned()
+            } else if let Some(note) = self.note(number) {
+                match SystemTime::now().duration_since(note.started) {
+                    Ok(held) => format!("{} (held for {})", note.name, elapsed(held)),
+                    Err(_) => note.name,
+                }
+            } else {
+                "in use by a run that left no note".to_owned()
+            };
+            lines.push(format!("slot {number}: {state}"));
+        }
+        Ok(Inspection::Judged(free.err()))
+    }
+
+    /// Takes `gate.lock`, creating it if need be, unless another run keeps
+    /// it for `GATE_PATIENCE`.
+    fn enter_gate(&self) -> io::Result<Option<File>> {
+        keep_gate(open_or_create(&self.dir.join("gate.lock"))?)
     }
 
     /// The note of the run in slot `number`, if it wrote one.
@@ -401,6 +474,23 @@ impl Note {
     }
 }
 
+/// The running runs' slots and, unless a new run must wait, the free slot
+/// it may take with the lock on it.
+struct Judgment {
+    running: Vec<u32>,
+    free: Result<(u32, File), Reason>,
+}
+
+/// How far `--status` could look.
+enum Inspection {
+    /// No run has created the queue's files yet.
+    NotSetUp,
+    /// Another run has kept `gate.lock` for too long.
+    Busy,
+    /// Why a new run would wait, if it would.
+    Judged(Option<Reason>),
+}
+
 enum Attempt {
     Started(Turn),
     Blocked(Blocked),
@@ -437,6 +527,36 @@ impl Reason {
             Self::Tight => " (memory is under pressure)",
             Self::Unknown => " (memory information is unavailable)",
         }
+    }
+}
+
+/// Locks the opened `gate.lock` unless another run keeps it for
+/// `GATE_PATIENCE`.
+fn keep_gate(gate: File) -> io::Result<Option<File>> {
+    let deadline = Instant::now() + GATE_PATIENCE;
+    loop {
+        match gate.try_lock() {
+            Ok(()) => return Ok(Some(gate)),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
+/// A length of time as `--status` prints it, such as `45s`, `3m12s` or
+/// `2h05m`.
+fn elapsed(time: Duration) -> String {
+    let seconds = time.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -861,6 +981,93 @@ mod tests {
         drop(second);
         set_up(&queue, 1).expect("shrink the queue");
         assert_eq!(files(&queue), ["1.holder", "1.lock", "gate.lock"]);
+    }
+
+    #[test]
+    fn status_tells_what_a_new_run_would_find() {
+        let dir = queue_dir();
+        let queue = bare_queue(&dir);
+        let at = format!("queue: {}", queue.dir.display());
+        let report = |memory| queue.report(Duration::ZERO, memory).expect("a report");
+        assert_eq!(
+            report(Memory::Unknown),
+            format!(
+                "{at}\nmemory: unavailable\n\
+                 a new run would set the queue up with one slot and start"
+            )
+        );
+        assert!(!queue.dir.exists(), "status creates nothing");
+
+        set_up(&queue, 2).expect("set up the queue");
+        assert_eq!(
+            report(Memory::Tight),
+            format!(
+                "{at}\nslot 1: free\nslot 2: free\nmemory: under pressure\n\
+                 a new run would start"
+            )
+        );
+
+        let first = start(&queue, "first");
+        age(&queue, 1);
+        let held = format!("slot 1: {} (held for ", name("first"));
+        let tight = report(Memory::Tight);
+        let lines: Vec<_> = tight.lines().collect();
+        assert!(lines[1].starts_with(&held), "{tight}");
+        assert_eq!(
+            lines[2..],
+            [
+                "slot 2: free",
+                "memory: under pressure",
+                "a new run would wait (memory is under pressure)"
+            ]
+        );
+        assert!(report(Memory::Spare).ends_with("memory: to spare\na new run would start"));
+        let before = files(&queue);
+        // The run that follows finds what status told, and status left
+        // nothing behind to stand in its way.
+        let second = wait(&queue, "second", Duration::ZERO, Memory::Spare).turn();
+        assert_eq!(before, ["1.holder", "1.lock", "2.lock", "gate.lock"]);
+        assert!(report(Memory::Spare).ends_with("a new run would wait for a free slot"));
+
+        fs::write(queue.holder_path(2), "").expect("clear the note");
+        drop(first);
+        assert!(report(Memory::Spare).ends_with(
+            "slot 1: free\nslot 2: in use by a run that left no note\nmemory: to spare\n\
+                 a new run would wait (another run did not record when it started)"
+        ));
+        drop(second);
+    }
+
+    #[test]
+    fn status_does_not_guess_while_the_gate_is_busy() {
+        let dir = queue_dir();
+        let queue = queue(&dir, 1);
+        let gate = open_or_create(&queue.dir.join("gate.lock")).expect("open the gate");
+        gate.lock().expect("hold the gate");
+        assert_eq!(
+            queue
+                .report(Duration::ZERO, Memory::Spare)
+                .expect("a report"),
+            format!(
+                "queue: {}\nmemory: to spare\n\
+                 a new run cannot be judged now: another run holds gate.lock",
+                queue.dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn elapsed_time_reads_in_its_largest_units() {
+        let cases = [
+            (0, "0s"),
+            (59, "59s"),
+            (192, "3m12s"),
+            (3600, "1h00m"),
+            (7500, "2h05m"),
+        ];
+        for (seconds, shown) in cases {
+            assert_eq!(elapsed(Duration::from_secs(seconds)), shown);
+        }
     }
 
     /// A run stopped while it decides keeps the gate; the others still say
